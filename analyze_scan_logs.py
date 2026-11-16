@@ -778,6 +778,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional path to export parsed interval data as CSV.",
     )
     parser.add_argument(
+        "-n",
+        "--no-plot",
+        action="store_true",
+        help="Suppress plot generation completely (text/table output only).",
+    )
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Display plot interactively in addition to saving.",
@@ -837,7 +843,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
         print(f"\nExported CSV to {args.csv}")
 
-    plot_metrics(runs, args.output, show=args.show)
+    if not args.no_plot:
+        plot_metrics(runs, args.output, show=args.show)
     return 0
 
 
