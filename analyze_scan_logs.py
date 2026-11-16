@@ -22,6 +22,22 @@ DEFENSIVE_INGEST_RE = re.compile(
 PROGRESS_RE = re.compile(
     r"Status after\s+([\d.]+)s:\s+scanning\s+\((\d+)\s+of\s+(\d+)\s+quanta\)"
 )
+# Matches output of:
+#   python -c "import lsst.resources; print(lsst.resources.__file__, getattr(lsst.resources, '__version__', None))"
+RESOURCES_FILE_RE = re.compile(
+    r"^(\S*lsst/resources/__init__\.pyc?)(?:\s+(\S.*))?$"
+)
+# Matches output of `eups list` with product name:
+#   lsst_resources        LOCAL:/path/to/resources   setup
+EUPS_WITH_PKG_RE = re.compile(
+    r"^lsst_resources\s+(\S+)(?:\s+(.*\bsetup\b.*))?$"
+)
+# Matches output of `eups list -s lsst_resources` (which omits the product column):
+#      LOCAL:/path/to/resources   setup
+#      g42f65a9c1b+c5406b4f9a     current w_2026_46 setup
+EUPS_NO_PKG_RE = re.compile(
+    r"^\s*(LOCAL:\S+|g[0-9a-f]{7,}\S*|[vV]?\d+\.\d+\S*|tickets/\S+|main\S*|master\S*)\s+((?:.*\s)?setup(?:\s.*)?)$"
+)
 
 
 @dataclass
@@ -44,11 +60,42 @@ class ProgressSample:
 class LogMetrics:
     label: str
     path: Path
+    resources_file: str | None = None
+    resources_version: str | None = None
+    eups_version: str | None = None
+    eups_tags: str | None = None
     read_graph_ts: datetime | None = None
     analyze_graph_ts: datetime | None = None
     defensive_ingest_ts: datetime | None = None
     defensive_ingest_after_s: float | None = None
     samples: list[ProgressSample] = field(default_factory=list)
+
+    @property
+    def has_version_info(self) -> bool:
+        return any(
+            x is not None
+            for x in (self.resources_file, self.resources_version, self.eups_version)
+        )
+
+    @property
+    def is_local_eups(self) -> bool:
+        if self.eups_version and self.eups_version.startswith("LOCAL:"):
+            return True
+        if self.eups_tags and "LOCAL:" in self.eups_tags:
+            return True
+        return False
+
+    @property
+    def version_summary(self) -> str:
+        parts: list[str] = []
+        if self.eups_version:
+            tag_str = f" [{self.eups_tags}]" if self.eups_tags else ""
+            parts.append(f"eups={self.eups_version}{tag_str}")
+        if self.resources_version:
+            parts.append(f"__version__={self.resources_version}")
+        if self.resources_file:
+            parts.append(f"__file__={self.resources_file}")
+        return " | ".join(parts) if parts else "NOT FOUND IN LOG"
 
     @property
     def read_graph_duration_s(self) -> float | None:
@@ -113,9 +160,28 @@ def parse_log(path: Path, label: str | None = None) -> LogMetrics:
     prev_scanned = 0
 
     with path.open("r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("+"):
+                continue
+
+            # Check for python lsst.resources.__file__ / __version__ line
+            if "import lsst.resources" not in line and (
+                m := RESOURCES_FILE_RE.match(line)
+            ):
+                metrics.resources_file = m.group(1)
+                if m.group(2):
+                    metrics.resources_version = m.group(2).strip()
+                continue
+
+            # Check for `eups list -s lsst_resources` output (with or without pkg column)
+            if m := EUPS_WITH_PKG_RE.match(line):
+                metrics.eups_version = m.group(1)
+                metrics.eups_tags = (m.group(2) or "").strip() or None
+                continue
+            if m := EUPS_NO_PKG_RE.match(line):
+                metrics.eups_version = m.group(1)
+                metrics.eups_tags = m.group(2).strip()
                 continue
 
             ts_match = TIMESTAMP_RE.match(line)
@@ -156,8 +222,71 @@ def parse_log(path: Path, label: str | None = None) -> LogMetrics:
     return metrics
 
 
+def verify_versions(runs: list[LogMetrics]) -> None:
+    """Print a non-fatal verification summary of lsst.resources versions across runs."""
+    print("\n=== lsst.resources Version Check ===")
+    for r in runs:
+        if not r.has_version_info:
+            print(
+                f"  [{r.label}] INFO: No lsst.resources / eups version lines found in log (continuing)."
+            )
+            continue
+
+        print(f"  [{r.label}]")
+        if r.resources_file:
+            print(f"    __file__    : {r.resources_file}")
+        if r.resources_version:
+            print(f"    __version__ : {r.resources_version}")
+        if r.eups_version:
+            tags = f" ({r.eups_tags})" if r.eups_tags else ""
+            print(f"    eups list   : {r.eups_version}{tags}")
+
+        is_ticket_label = bool(
+            re.search(r"(?:ticket|dm[-_]\d+)", r.label, re.IGNORECASE)
+        )
+        if r.is_local_eups:
+            print(
+                f"    status      : OK - using local EUPS override ({r.eups_version})"
+            )
+        elif is_ticket_label and r.eups_version:
+            print(
+                f"    status      : WARNING - label '{r.label}' looks like a ticket branch, "
+                f"but EUPS version is '{r.eups_version}' (not LOCAL:...)"
+            )
+
+    # If multiple runs have version info, verify they aren't accidentally identical
+    with_info = [r for r in runs if r.has_version_info]
+    if len(with_info) >= 2:
+        first = with_info[0]
+        for other in with_info[1:]:
+            same_file = (
+                first.resources_file
+                and other.resources_file
+                and first.resources_file == other.resources_file
+            )
+            same_eups = (
+                first.eups_version
+                and other.eups_version
+                and first.eups_version == other.eups_version
+            )
+            if same_file or same_eups:
+                print(
+                    f"  [WARNING] '{first.label}' and '{other.label}' report the SAME "
+                    f"lsst.resources setup ({first.version_summary})!"
+                )
+            else:
+                print(
+                    f"  [OK] '{first.label}' and '{other.label}' are using distinct "
+                    f"lsst.resources versions."
+                )
+
+
 def print_single_table(m: LogMetrics) -> None:
     print(f"\n=== Timing Table: {m.label} ({m.path}) ===")
+    if m.has_version_info:
+        print(f"  lsst.resources version info     : {m.version_summary}")
+    else:
+        print("  lsst.resources version info     : N/A (not present in log)")
     if m.read_graph_duration_s is not None:
         print(f"  Reading predicted quantum graph : {m.read_graph_duration_s:7.2f} s")
     if m.analyze_to_defensive_s is not None:
@@ -593,6 +722,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: log file not found: {path}", file=sys.stderr)
             return 1
         runs.append(parse_log(path, label=label))
+
+    verify_versions(runs)
 
     for r in runs:
         print_single_table(r)
