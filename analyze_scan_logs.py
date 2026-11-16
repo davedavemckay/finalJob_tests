@@ -411,6 +411,39 @@ def print_comparison_table(runs: list[LogMetrics]) -> None:
         [float(r.samples[0].scanned) if r.samples else None for r in runs],
         "q",
     )
+    fmt_row(
+        "Active scan rate @ 600s",
+        [
+            r.samples[0].scanned / (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0))
+            if r.samples and (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0)) > 0
+            else None
+            for r in runs
+        ],
+        "q/s",
+    )
+
+    # Compare at the last common step when logs have different lengths
+    common_n = min((len(r.samples) for r in runs if r.samples), default=0)
+    if common_n > 0 and len({len(r.samples) for r in runs}) > 1:
+        common_t = runs[0].samples[common_n - 1].elapsed_s
+        fmt_row(
+            f"Quanta @ {common_t:.0f}s (step {common_n})",
+            [float(r.samples[common_n - 1].scanned) for r in runs],
+            "q",
+        )
+        fmt_row(
+            f"Steady rate (600s->{common_t:.0f}s)",
+            [
+                (r.samples[common_n - 1].scanned - r.samples[0].scanned)
+                / (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s)
+                if common_n >= 2
+                and (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s) > 0
+                else None
+                for r in runs
+            ],
+            "q/s",
+        )
+
     fmt_row("Final quanta scanned", [float(r.final_scanned) for r in runs], "q")
     fmt_row("Overall rate", [r.overall_rate for r in runs], "q/s")
     fmt_row("Active scan rate (post-setup)", [r.active_scan_rate for r in runs], "q/s")
