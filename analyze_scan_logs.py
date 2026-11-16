@@ -163,7 +163,9 @@ def print_single_table(m: LogMetrics) -> None:
     if m.analyze_to_defensive_s is not None:
         print(f"  Analyzing -> defensive ingest   : {m.analyze_to_defensive_s:7.2f} s")
     if m.defensive_ingest_after_s is not None:
-        print(f"  Total pre-scan (logged [after]) : {m.defensive_ingest_after_s:7.2f} s")
+        print(
+            f"  Total pre-scan (logged [after]) : {m.defensive_ingest_after_s:7.2f} s"
+        )
 
     if not m.samples:
         print("  No progress lines found.")
@@ -189,7 +191,9 @@ def print_single_table(m: LogMetrics) -> None:
         f"  Scanned after {m.final_elapsed_s:.1f}s    : {m.final_scanned:,d} ({m.samples[-1].pct_complete:.2f}%)"
     )
     print(f"  Overall cumulative rate  : {m.overall_rate:.2f} quanta/s")
-    print(f"  Active scan rate         : {m.active_scan_rate:.2f} quanta/s (excluding pre-scan)")
+    print(
+        f"  Active scan rate         : {m.active_scan_rate:.2f} quanta/s (excluding pre-scan)"
+    )
     print(f"  Steady-state rate (t>600): {m.steady_state_rate:.2f} quanta/s")
     print(
         f"  Interval rate (t>600)    : mean={statistics.mean(steady_rates):.2f}, "
@@ -218,8 +222,7 @@ def print_comparison_table(runs: list[LogMetrics]) -> None:
 
     def fmt_row(name: str, vals: list[float | None], unit: str = "") -> None:
         cells = [
-            f"{v:13.2f} {unit:<2}" if v is not None else f"{'N/A':>16}"
-            for v in vals
+            f"{v:13.2f} {unit:<2}" if v is not None else f"{'N/A':>16}" for v in vals
         ]
         diff_str = ""
         if (
@@ -234,7 +237,9 @@ def print_comparison_table(runs: list[LogMetrics]) -> None:
         print(f"{name:<34} | " + " | ".join(cells) + diff_str)
 
     fmt_row("Read predicted graph", [r.read_graph_duration_s for r in runs], "s")
-    fmt_row("Analyze -> defensive ingest", [r.analyze_to_defensive_s for r in runs], "s")
+    fmt_row(
+        "Analyze -> defensive ingest", [r.analyze_to_defensive_s for r in runs], "s"
+    )
     fmt_row("Logged pre-scan [after]", [r.defensive_ingest_after_s for r in runs], "s")
     fmt_row(
         "Quanta @ 600s",
@@ -467,7 +472,9 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
             legend_y += 18
 
     # Panel 1: Cumulative Quanta (thousands)
-    max_q_k = max((s.scanned / 1e3 for r in runs for s in r.samples), default=1.0) * 1.08
+    max_q_k = (
+        max((s.scanned / 1e3 for r in runs for s in r.samples), default=1.0) * 1.08
+    )
     p1_series = [
         (
             f"{r.label} ({r.overall_rate:.2f} q/s)",
@@ -522,7 +529,12 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
             ]
             all_dq.extend(v for _, v in pts)
             p3_series.append(
-                (f"{r.label} - {base.label} (quanta)", pts, colors[(idx + 1) % len(colors)], "")
+                (
+                    f"{r.label} - {base.label} (quanta)",
+                    pts,
+                    colors[(idx + 1) % len(colors)],
+                    "",
+                )
             )
         dq_min = min(all_dq) - 50.0
         dq_max = max(all_dq) + 50.0
