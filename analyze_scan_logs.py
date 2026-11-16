@@ -27,17 +27,19 @@ PROGRESS_RE = re.compile(
 RESOURCES_FILE_RE = re.compile(
     r"^(\S*lsst/resources/__init__\.pyc?)(?:\s+(\S.*))?$"
 )
-# Matches output of `eups list` with product name:
-#   lsst_resources        LOCAL:/path/to/resources   setup
+# Matches output of `eups list | grep resources` (only the line tagged `setup`):
+#   resources             LOCAL:/sdf/data/rubin/user/.../resources      setup
 EUPS_WITH_PKG_RE = re.compile(
-    r"^lsst_resources\s+(\S+)(?:\s+(.*\bsetup\b.*))?$"
+    r"^(?:lsst_)?resources\s+(\S+)\s+((?:.*\s)?setup(?:\s.*)?)$"
 )
-# Matches output of `eups list -s lsst_resources` (which omits the product column):
-#      LOCAL:/path/to/resources   setup
-#      g42f65a9c1b+c5406b4f9a     current w_2026_46 setup
+# Matches output of `eups list -s resources` (which omits the product column):
+#      LOCAL:/sdf/data/rubin/user/.../resources         setup
+#      g4354dbd74b+940ec9190d     current w_2026_46 setup
 EUPS_NO_PKG_RE = re.compile(
     r"^\s*(LOCAL:\S+|g[0-9a-f]{7,}\S*|[vV]?\d+\.\d+\S*|tickets/\S+|main\S*|master\S*)\s+((?:.*\s)?setup(?:\s.*)?)$"
 )
+# Matches error when `eups list -s lsst_resources` was called instead of `resources`:
+EUPS_ERR_RE = re.compile(r"^eups list:\s*(Unable to find product\s+\S+.*)$")
 
 
 @dataclass
@@ -64,6 +66,7 @@ class LogMetrics:
     resources_version: str | None = None
     eups_version: str | None = None
     eups_tags: str | None = None
+    eups_error: str | None = None
     read_graph_ts: datetime | None = None
     analyze_graph_ts: datetime | None = None
     defensive_ingest_ts: datetime | None = None
@@ -74,7 +77,12 @@ class LogMetrics:
     def has_version_info(self) -> bool:
         return any(
             x is not None
-            for x in (self.resources_file, self.resources_version, self.eups_version)
+            for x in (
+                self.resources_file,
+                self.resources_version,
+                self.eups_version,
+                self.eups_error,
+            )
         )
 
     @property
@@ -86,11 +94,20 @@ class LogMetrics:
         return False
 
     @property
+    def is_local_file_path(self) -> bool | None:
+        if not self.resources_file:
+            return None
+        shared_markers = ("/conda/envs/", "/cvmfs/", "/site-packages/", "/share/eups/")
+        return not any(m in self.resources_file for m in shared_markers)
+
+    @property
     def version_summary(self) -> str:
         parts: list[str] = []
         if self.eups_version:
             tag_str = f" [{self.eups_tags}]" if self.eups_tags else ""
             parts.append(f"eups={self.eups_version}{tag_str}")
+        elif self.eups_error:
+            parts.append(f"eups_error={self.eups_error}")
         if self.resources_version:
             parts.append(f"__version__={self.resources_version}")
         if self.resources_file:
@@ -174,14 +191,20 @@ def parse_log(path: Path, label: str | None = None) -> LogMetrics:
                     metrics.resources_version = m.group(2).strip()
                 continue
 
-            # Check for `eups list -s lsst_resources` output (with or without pkg column)
+            # Check for `eups list -s resources` or `eups list | grep resources`
             if m := EUPS_WITH_PKG_RE.match(line):
                 metrics.eups_version = m.group(1)
                 metrics.eups_tags = (m.group(2) or "").strip() or None
+                metrics.eups_error = None
                 continue
             if m := EUPS_NO_PKG_RE.match(line):
                 metrics.eups_version = m.group(1)
                 metrics.eups_tags = m.group(2).strip()
+                metrics.eups_error = None
+                continue
+            if m := EUPS_ERR_RE.match(line):
+                if not metrics.eups_version:
+                    metrics.eups_error = m.group(1)
                 continue
 
             ts_match = TIMESTAMP_RE.match(line)
@@ -240,6 +263,10 @@ def verify_versions(runs: list[LogMetrics]) -> None:
         if r.eups_version:
             tags = f" ({r.eups_tags})" if r.eups_tags else ""
             print(f"    eups list   : {r.eups_version}{tags}")
+        elif r.eups_error:
+            print(
+                f"    eups list   : {r.eups_error} (tip: EUPS product name is 'resources', not 'lsst_resources')"
+            )
 
         is_ticket_label = bool(
             re.search(r"(?:ticket|dm[-_]\d+)", r.label, re.IGNORECASE)
@@ -248,10 +275,19 @@ def verify_versions(runs: list[LogMetrics]) -> None:
             print(
                 f"    status      : OK - using local EUPS override ({r.eups_version})"
             )
-        elif is_ticket_label and r.eups_version:
+        elif r.is_local_file_path is True:
+            print(
+                f"    status      : OK - __file__ points to local checkout ({r.resources_file})"
+            )
+        elif is_ticket_label and (r.eups_version or r.is_local_file_path is False):
+            detail = (
+                f"EUPS='{r.eups_version}'"
+                if r.eups_version
+                else f"__file__='{r.resources_file}'"
+            )
             print(
                 f"    status      : WARNING - label '{r.label}' looks like a ticket branch, "
-                f"but EUPS version is '{r.eups_version}' (not LOCAL:...)"
+                f"but {detail} appears to be the shared stack install"
             )
 
     # If multiple runs have version info, verify they aren't accidentally identical
