@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 
-setup lsst_distrib
-setup -j -r resources
-
 python -c "import lsst.resources; print(lsst.resources.__file__, getattr(lsst.resources, '__version__', None))"
 eups list -s resources
 
