@@ -8,16 +8,16 @@ lsstVersion: w_2026_45
 site:
   RAL:
     nodeset: "RAL"
-  customEnvSetup: >
-    pwd;
-    git clone https://github.com/lsst/resources;
-    pushd resources;
-    git checkout tickets/DM-57094;
-    setup -j -r .;
-    scons -j 8;
-    popd;
-
-    taskset -pc $$;
+    customEnvSetup: >
+      pwd;
+      git clone https://github.com/lsst/resources;
+      pushd resources;
+      git checkout tickets/DM-57094;
+      setup -j -r .;
+      scons -j 8;
+      popd;
+  
+      taskset -pc $$;
 
 submitCmd: true
 computeSite: RAL
