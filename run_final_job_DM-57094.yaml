@@ -14,7 +14,7 @@ site:
       pushd resources;
       git checkout tickets/DM-57094;
       setup -j -r .;
-      scons -j 8;
+      scons python;
       popd;
       taskset -pc $$;
 
