@@ -16,7 +16,6 @@ site:
       setup -j -r .;
       scons -j 8;
       popd;
-  
       taskset -pc $$;
 
 submitCmd: true
