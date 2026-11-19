@@ -1,0 +1,39 @@
+priority: 2000
+bpsBatchSubmission: true
+bpsUseRunTempSpace: true
+bpsUseShared: false
+bpsMakeCommand: false
+fileDistributionEndpoint: "${LSST_RUN_TEMP_SPACE}/bps_dev/payload/{uniqProcName}/"
+
+lsstVersion: w_2026_45
+wmsServiceClass: "lsst.ctrl.bps.htcondor.HTCondorService"
+
+site:
+  RAL:
+    nodeset: "LANCS"
+    fileDistributionEndpoint: "${LSST_RUN_TEMP_SPACE}/bps_dev/payload/{uniqProcName}/"
+    softwarePath: "/cvmfs/sw.lsst.eu/almalinux-x86_64/lsst_distrib/{lsstVersion}"
+    bpsBatchSubmission: true
+    bpsUseRunTempSpace: true
+    bpsUseShared: false
+    bpsMakeCommand: false
+
+submitCmd: true
+computeSite: LANCS
+
+customJob:
+  queue: ""
+  executable: run_final_job_main_LANCS.sh
+  arguments: ""
+  requestCpus: 16
+  requestMemory: 64000
+
+payload:
+  payloadName: final_job_test_main_LANCS
+  butlerConfig: "dp2_prep"
+
+project: dev
+numberOfRetries: 0
+
+preparePayloadWorkflow:
+  computeSite: bps_submit
