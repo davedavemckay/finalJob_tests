@@ -622,6 +622,25 @@ class RunGroup:
                 rates.extend(agg.as_local_worker_rates)
         return rates
 
+    def worker_boxplot_label(self) -> str:
+        """Clear label distinguishing workers/run from total pooled samples across replicates."""
+        per_run_counts = [
+            len(agg.as_local_worker_rates)
+            for r in self.runs
+            if (agg := r.http_aggregate()) and agg.as_local_worker_rates
+        ]
+        total_samples = sum(per_run_counts)
+        if not self.is_multi:
+            return f"{self.label}\n({total_samples} workers)"
+        if len(set(per_run_counts)) == 1:
+            return f"{self.display_label}\n({per_run_counts[0]} workers/run, {total_samples} samples)"
+        if per_run_counts:
+            return (
+                f"{self.display_label}\n"
+                f"({min(per_run_counts)}-{max(per_run_counts)} workers/run, {total_samples} samples)"
+            )
+        return self.display_label
+
 
 def parse_log(path: Path, label: str | None = None) -> LogMetrics:
     metrics = LogMetrics(label=label or path.stem, path=path)
@@ -1590,7 +1609,7 @@ def plot_http_metrics(
 
     # Panel 4: Per-worker as_local() rate distribution (boxplot)
     box_data = [g.all_worker_rates() for g in http_groups]
-    box_labels = [f"{g.display_label}\n({len(d)} workers)" for g, d in zip(http_groups, box_data)]
+    box_labels = [g.worker_boxplot_label() for g in http_groups]
     valid = [(lbl, d) for lbl, d in zip(box_labels, box_data) if d]
     if valid:
         ax3.boxplot(
@@ -1795,9 +1814,10 @@ def _write_http_svg_fallback(
                 f'<line x1="{cx - box_w / 2:.1f}" y1="{wy(med):.1f}" x2="{cx + box_w / 2:.1f}" y2="{wy(med):.1f}" '
                 f'stroke="{c}" stroke-width="2.5"/>'
             )
+        svg_lbl = g.worker_boxplot_label().replace("\n", " ")
         lines.append(
-            f'<text x="{cx:.1f}" y="{y0 + panel_h + 18}" text-anchor="middle" fill="#222" font-size="11">'
-            f"{g.display_label} ({len(wr)}w)</text>"
+            f'<text x="{cx:.1f}" y="{y0 + panel_h + 18}" text-anchor="middle" fill="#222" font-size="10">'
+            f"{svg_lbl}</text>"
         )
 
     lines.append("</svg>")
