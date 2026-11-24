@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,127 @@ EUPS_NO_PKG_RE = re.compile(
 )
 # Matches error when `eups list -s lsst_resources` was called instead of `resources`:
 EUPS_ERR_RE = re.compile(r"^eups list:\s*(Unable to find product\s+\S+.*)$")
+# Matches per-task HTTP summary lines from lsst.resources:
+#   [HTTP-SUMMARY pid=1618 proc=scanner-001 up=3947.0s] reqs=19897 status={302: 9949, 200: 9948} | FE(new=9949@30.8ms reuse=0@0.0ms q=1) | BE(new=9948@35.5ms reuse=0@0.0ms pools=1 hosts=20) | read(n=0 avg=0.0ms) as_local(n=9948 get=67.9ms write=46.6ms [net=46.4ms disk=0.2ms] buf=1048576) dav={}
+HTTP_SUMMARY_RE = re.compile(
+    r"\[HTTP-SUMMARY\s+pid=(\d+)\s+proc=(\S+)\s+up=([\d.]+)s\]\s+"
+    r"reqs=(\d+)\s+status=(\{[^}]*\})\s+\|\s+"
+    r"FE\(new=(\d+)@([\d.]+)ms\s+reuse=(\d+)@([\d.]+)ms\s+q=(\d+)\)\s+\|\s+"
+    r"BE\(new=(\d+)@([\d.]+)ms\s+reuse=(\d+)@([\d.]+)ms\s+pools=(\d+)\s+hosts=(\d+)\)\s+\|\s+"
+    r"read\(n=(\d+)\s+avg=([\d.]+)ms\)\s+"
+    r"as_local\(n=(\d+)\s+get=([\d.]+)ms\s+write=([\d.]+)ms\s+"
+    r"\[net=([\d.]+)ms\s+disk=([\d.]+)ms\]\s+buf=(\d+)\)\s+"
+    r"dav=(\{[^}]*\})"
+)
+
+
+@dataclass
+class HttpSummarySample:
+    timestamp: datetime | None
+    pid: int
+    proc: str
+    up_s: float
+    reqs: int
+    status: dict[int, int]
+    fe_new: int
+    fe_new_ms: float
+    fe_reuse: int
+    fe_reuse_ms: float
+    fe_q: int
+    be_new: int
+    be_new_ms: float
+    be_reuse: int
+    be_reuse_ms: float
+    be_pools: int
+    be_hosts: int
+    read_n: int
+    read_avg_ms: float
+    as_local_n: int
+    as_local_get_ms: float
+    as_local_write_ms: float
+    as_local_net_ms: float
+    as_local_disk_ms: float
+    as_local_buf: int
+    dav: dict[str, int]
+
+    @property
+    def fe_total(self) -> int:
+        return self.fe_new + self.fe_reuse
+
+    @property
+    def fe_reuse_pct(self) -> float:
+        return (100.0 * self.fe_reuse / self.fe_total) if self.fe_total else 0.0
+
+    @property
+    def be_total(self) -> int:
+        return self.be_new + self.be_reuse
+
+    @property
+    def be_reuse_pct(self) -> float:
+        return (100.0 * self.be_reuse / self.be_total) if self.be_total else 0.0
+
+    @property
+    def as_local_total_ms(self) -> float:
+        return self.as_local_get_ms + self.as_local_write_ms
+
+    @property
+    def as_local_rate(self) -> float:
+        return (self.as_local_n / self.up_s) if self.up_s > 0 else 0.0
+
+
+@dataclass
+class HttpAggregate:
+    worker_count: int
+    total_reports: int
+    latest_workers: list[HttpSummarySample]
+    max_up_s: float
+    mean_up_s: float
+    total_reqs: int
+    status_counts: dict[int, int]
+    fe_new_total: int
+    fe_reuse_total: int
+    fe_new_ms: float
+    fe_reuse_ms: float
+    fe_avg_ms: float
+    fe_q_max: int
+    be_new_total: int
+    be_reuse_total: int
+    be_new_ms: float
+    be_reuse_ms: float
+    be_avg_ms: float
+    be_pools_max: int
+    be_hosts_mean: float
+    be_hosts_max: int
+    read_n_total: int
+    read_avg_ms: float
+    as_local_n_total: int
+    as_local_get_ms: float
+    as_local_write_ms: float
+    as_local_net_ms: float
+    as_local_disk_ms: float
+    as_local_total_ms: float
+    as_local_bufs: list[int]
+    as_local_agg_rate: float
+    as_local_worker_rates: list[float]
+    dav_counts: dict[str, int]
+
+    @property
+    def fe_reuse_pct(self) -> float:
+        tot = self.fe_new_total + self.fe_reuse_total
+        return (100.0 * self.fe_reuse_total / tot) if tot else 0.0
+
+    @property
+    def be_reuse_pct(self) -> float:
+        tot = self.be_new_total + self.be_reuse_total
+        return (100.0 * self.be_reuse_total / tot) if tot else 0.0
+
+
+def _safe_literal_dict(raw: str) -> dict:
+    try:
+        val = ast.literal_eval(raw)
+        return val if isinstance(val, dict) else {}
+    except (SyntaxError, ValueError):
+        return {}
 
 
 @dataclass
@@ -72,6 +194,100 @@ class LogMetrics:
     defensive_ingest_ts: datetime | None = None
     defensive_ingest_after_s: float | None = None
     samples: list[ProgressSample] = field(default_factory=list)
+    http_summaries: list[HttpSummarySample] = field(default_factory=list)
+
+    def http_aggregate(self) -> HttpAggregate | None:
+        """Aggregate latest cumulative HTTP-SUMMARY snapshot per (pid, proc)."""
+        if not self.http_summaries:
+            return None
+        latest_by_worker: dict[tuple[int, str], HttpSummarySample] = {}
+        for h in self.http_summaries:
+            key = (h.pid, h.proc)
+            prev = latest_by_worker.get(key)
+            if prev is None or h.up_s >= prev.up_s:
+                latest_by_worker[key] = h
+
+        workers = sorted(latest_by_worker.values(), key=lambda x: (x.proc, x.pid))
+
+        def wavg(pairs: list[tuple[int, float]]) -> float:
+            tot_n = sum(n for n, _ in pairs)
+            if tot_n <= 0:
+                return 0.0
+            return sum(n * v for n, v in pairs) / tot_n
+
+        status_counts: dict[int, int] = {}
+        dav_counts: dict[str, int] = {}
+        for w in workers:
+            for k, v in w.status.items():
+                status_counts[k] = status_counts.get(k, 0) + int(v)
+            for k, v in w.dav.items():
+                dav_counts[str(k)] = dav_counts.get(str(k), 0) + int(v)
+
+        fe_new_tot = sum(w.fe_new for w in workers)
+        fe_reuse_tot = sum(w.fe_reuse for w in workers)
+        fe_new_ms = wavg([(w.fe_new, w.fe_new_ms) for w in workers])
+        fe_reuse_ms = wavg([(w.fe_reuse, w.fe_reuse_ms) for w in workers])
+        fe_avg_ms = wavg(
+            [(w.fe_new, w.fe_new_ms) for w in workers]
+            + [(w.fe_reuse, w.fe_reuse_ms) for w in workers]
+        )
+
+        be_new_tot = sum(w.be_new for w in workers)
+        be_reuse_tot = sum(w.be_reuse for w in workers)
+        be_new_ms = wavg([(w.be_new, w.be_new_ms) for w in workers])
+        be_reuse_ms = wavg([(w.be_reuse, w.be_reuse_ms) for w in workers])
+        be_avg_ms = wavg(
+            [(w.be_new, w.be_new_ms) for w in workers]
+            + [(w.be_reuse, w.be_reuse_ms) for w in workers]
+        )
+
+        read_n_tot = sum(w.read_n for w in workers)
+        read_avg_ms = wavg([(w.read_n, w.read_avg_ms) for w in workers])
+
+        al_n_tot = sum(w.as_local_n for w in workers)
+        al_get_ms = wavg([(w.as_local_n, w.as_local_get_ms) for w in workers])
+        al_write_ms = wavg([(w.as_local_n, w.as_local_write_ms) for w in workers])
+        al_net_ms = wavg([(w.as_local_n, w.as_local_net_ms) for w in workers])
+        al_disk_ms = wavg([(w.as_local_n, w.as_local_disk_ms) for w in workers])
+
+        worker_rates = [w.as_local_rate for w in workers if w.up_s > 0]
+        agg_rate = sum(worker_rates)
+
+        return HttpAggregate(
+            worker_count=len(workers),
+            total_reports=len(self.http_summaries),
+            latest_workers=workers,
+            max_up_s=max((w.up_s for w in workers), default=0.0),
+            mean_up_s=statistics.mean(w.up_s for w in workers) if workers else 0.0,
+            total_reqs=sum(w.reqs for w in workers),
+            status_counts=dict(sorted(status_counts.items())),
+            fe_new_total=fe_new_tot,
+            fe_reuse_total=fe_reuse_tot,
+            fe_new_ms=fe_new_ms,
+            fe_reuse_ms=fe_reuse_ms,
+            fe_avg_ms=fe_avg_ms,
+            fe_q_max=max((w.fe_q for w in workers), default=0),
+            be_new_total=be_new_tot,
+            be_reuse_total=be_reuse_tot,
+            be_new_ms=be_new_ms,
+            be_reuse_ms=be_reuse_ms,
+            be_avg_ms=be_avg_ms,
+            be_pools_max=max((w.be_pools for w in workers), default=0),
+            be_hosts_mean=statistics.mean(w.be_hosts for w in workers) if workers else 0.0,
+            be_hosts_max=max((w.be_hosts for w in workers), default=0),
+            read_n_total=read_n_tot,
+            read_avg_ms=read_avg_ms,
+            as_local_n_total=al_n_tot,
+            as_local_get_ms=al_get_ms,
+            as_local_write_ms=al_write_ms,
+            as_local_net_ms=al_net_ms,
+            as_local_disk_ms=al_disk_ms,
+            as_local_total_ms=al_get_ms + al_write_ms,
+            as_local_bufs=sorted({w.as_local_buf for w in workers}),
+            as_local_agg_rate=agg_rate,
+            as_local_worker_rates=worker_rates,
+            dav_counts=dict(sorted(dav_counts.items())),
+        )
 
     @property
     def has_version_info(self) -> bool:
@@ -210,6 +426,39 @@ def parse_log(path: Path, label: str | None = None) -> LogMetrics:
             ts_match = TIMESTAMP_RE.match(line)
             ts = datetime.fromisoformat(ts_match.group(1)) if ts_match else None
 
+            if m := HTTP_SUMMARY_RE.search(line):
+                metrics.http_summaries.append(
+                    HttpSummarySample(
+                        timestamp=ts,
+                        pid=int(m.group(1)),
+                        proc=m.group(2),
+                        up_s=float(m.group(3)),
+                        reqs=int(m.group(4)),
+                        status=_safe_literal_dict(m.group(5)),
+                        fe_new=int(m.group(6)),
+                        fe_new_ms=float(m.group(7)),
+                        fe_reuse=int(m.group(8)),
+                        fe_reuse_ms=float(m.group(9)),
+                        fe_q=int(m.group(10)),
+                        be_new=int(m.group(11)),
+                        be_new_ms=float(m.group(12)),
+                        be_reuse=int(m.group(13)),
+                        be_reuse_ms=float(m.group(14)),
+                        be_pools=int(m.group(15)),
+                        be_hosts=int(m.group(16)),
+                        read_n=int(m.group(17)),
+                        read_avg_ms=float(m.group(18)),
+                        as_local_n=int(m.group(19)),
+                        as_local_get_ms=float(m.group(20)),
+                        as_local_write_ms=float(m.group(21)),
+                        as_local_net_ms=float(m.group(22)),
+                        as_local_disk_ms=float(m.group(23)),
+                        as_local_buf=int(m.group(24)),
+                        dav=_safe_literal_dict(m.group(25)),
+                    )
+                )
+                continue
+
             if READING_GRAPH_RE.search(line):
                 metrics.read_graph_ts = ts
             elif ANALYZING_GRAPH_RE.search(line):
@@ -317,7 +566,74 @@ def verify_versions(runs: list[LogMetrics]) -> None:
                 )
 
 
-def print_single_table(m: LogMetrics) -> None:
+def print_http_summary(m: LogMetrics, show_workers: bool = False) -> None:
+    agg = m.http_aggregate()
+    if agg is None:
+        return
+
+    print(
+        f"\n  --- HTTP-SUMMARY Diagnostics ({agg.worker_count} workers, {agg.total_reports} reports, "
+        f"max up={agg.max_up_s:.1f}s) ---"
+    )
+    print(f"  Total HTTP requests      : {agg.total_reqs:,d}  status={agg.status_counts}")
+    if agg.dav_counts:
+        print(f"  WebDAV calls             : {agg.dav_counts}")
+    print(
+        f"  Frontend (FE)            : new={agg.fe_new_total:,d}@{agg.fe_new_ms:.1f}ms, "
+        f"reuse={agg.fe_reuse_total:,d}@{agg.fe_reuse_ms:.1f}ms "
+        f"(reuse={agg.fe_reuse_pct:.1f}%, avg={agg.fe_avg_ms:.1f}ms, max_q={agg.fe_q_max})"
+    )
+    print(
+        f"  Backend  (BE)            : new={agg.be_new_total:,d}@{agg.be_new_ms:.1f}ms, "
+        f"reuse={agg.be_reuse_total:,d}@{agg.be_reuse_ms:.1f}ms "
+        f"(reuse={agg.be_reuse_pct:.1f}%, avg={agg.be_avg_ms:.1f}ms, "
+        f"max_pools={agg.be_pools_max}, hosts avg={agg.be_hosts_mean:.1f}/max={agg.be_hosts_max})"
+    )
+    if agg.read_n_total > 0:
+        print(
+            f"  read()                   : n={agg.read_n_total:,d}, avg={agg.read_avg_ms:.1f}ms"
+        )
+    buf_str = ", ".join(f"{b:,d}B" for b in agg.as_local_bufs)
+    print(
+        f"  as_local()               : n={agg.as_local_n_total:,d}, total={agg.as_local_total_ms:.1f}ms "
+        f"(get={agg.as_local_get_ms:.1f}ms + write={agg.as_local_write_ms:.1f}ms "
+        f"[net={agg.as_local_net_ms:.1f}ms, disk={agg.as_local_disk_ms:.1f}ms], buf={buf_str})"
+    )
+    if agg.as_local_worker_rates:
+        print(
+            f"  as_local() throughput    : agg={agg.as_local_agg_rate:.2f} files/s "
+            f"(per-worker: min={min(agg.as_local_worker_rates):.2f}, "
+            f"median={statistics.median(agg.as_local_worker_rates):.2f}, "
+            f"max={max(agg.as_local_worker_rates):.2f} files/s)"
+        )
+
+    if show_workers:
+        print(
+            f"\n  {'Worker':<14} | {'PID':>7} | {'Up (s)':>8} | {'as_local':>8} | "
+            f"{'Rate/s':>6} | {'FE ms':>6} | {'FE%':>5} | {'BE ms':>6} | {'BE%':>5} | "
+            f"{'get':>6} | {'net':>6} | {'disk':>5} | {'hosts':>5}"
+        )
+        print("  " + "-" * 116)
+        for w in agg.latest_workers:
+            fe_avg = (
+                (w.fe_new * w.fe_new_ms + w.fe_reuse * w.fe_reuse_ms) / w.fe_total
+                if w.fe_total
+                else 0.0
+            )
+            be_avg = (
+                (w.be_new * w.be_new_ms + w.be_reuse * w.be_reuse_ms) / w.be_total
+                if w.be_total
+                else 0.0
+            )
+            print(
+                f"  {w.proc:<14} | {w.pid:7d} | {w.up_s:8.1f} | {w.as_local_n:8,d} | "
+                f"{w.as_local_rate:6.2f} | {fe_avg:6.1f} | {w.fe_reuse_pct:4.1f}% | "
+                f"{be_avg:6.1f} | {w.be_reuse_pct:4.1f}% | "
+                f"{w.as_local_get_ms:6.1f} | {w.as_local_net_ms:6.1f} | {w.as_local_disk_ms:5.1f} | {w.be_hosts:5d}"
+            )
+
+
+def print_single_table(m: LogMetrics, show_http_workers: bool = False) -> None:
     print(f"\n=== Timing Table: {m.label} ({m.path}) ===")
     if m.has_version_info:
         print(f"  lsst.resources version info     : {m.version_summary}")
@@ -334,6 +650,7 @@ def print_single_table(m: LogMetrics) -> None:
 
     if not m.samples:
         print("  No progress lines found.")
+        print_http_summary(m, show_workers=show_http_workers)
         return
 
     print(
@@ -366,6 +683,7 @@ def print_single_table(m: LogMetrics) -> None:
         f"min={min(steady_rates):.2f}, max={max(steady_rates):.2f} quanta/s"
     )
     print(f"  Projected total duration : {m.estimated_total_hours:.2f} hours")
+    print_http_summary(m, show_workers=show_http_workers)
 
 
 def print_comparison_table(runs: list[LogMetrics]) -> None:
@@ -390,15 +708,13 @@ def print_comparison_table(runs: list[LogMetrics]) -> None:
             f"{v:13.2f} {unit:<2}" if v is not None else f"{'N/A':>16}" for v in vals
         ]
         diff_str = ""
-        if (
-            len(runs) == 2
-            and vals[0] is not None
-            and vals[1] is not None
-            and vals[0] != 0
-        ):
+        if len(runs) == 2 and vals[0] is not None and vals[1] is not None:
             delta = vals[1] - vals[0]
-            pct = 100.0 * delta / vals[0]
-            diff_str = f" | {delta:+10.2f} {unit:<2} ({pct:+6.2f}%)"
+            if vals[0] != 0:
+                pct = 100.0 * delta / vals[0]
+                diff_str = f" | {delta:+10.2f} {unit:<2} ({pct:+6.2f}%)"
+            else:
+                diff_str = f" | {delta:+10.2f} {unit:<2} (   N/A)"
         print(f"{name:<34} | " + " | ".join(cells) + diff_str)
 
     fmt_row("Read predicted graph", [r.read_graph_duration_s for r in runs], "s")
@@ -469,6 +785,92 @@ def print_comparison_table(runs: list[LogMetrics]) -> None:
                 f"{sa.scanned:16,d} | {sb.scanned:16,d} | {dq:+12,d} | "
                 f"{sa.interval_rate:14.2f} | {sb.interval_rate:16.2f} | {dr:+10.2f}"
             )
+
+    aggs = [r.http_aggregate() for r in runs]
+    if any(a is not None for a in aggs):
+        print("\n=== HTTP-SUMMARY Comparison ===")
+        print(header)
+        print("-" * len(header))
+        fmt_row(
+            "HTTP workers",
+            [float(a.worker_count) if a else None for a in aggs],
+            "",
+        )
+        fmt_row(
+            "Total HTTP requests",
+            [float(a.total_reqs) if a else None for a in aggs],
+            "",
+        )
+        fmt_row(
+            "FE reuse rate",
+            [a.fe_reuse_pct if a else None for a in aggs],
+            "%",
+        )
+        fmt_row(
+            "FE avg latency",
+            [a.fe_avg_ms if a else None for a in aggs],
+            "ms",
+        )
+        fmt_row(
+            "BE reuse rate",
+            [a.be_reuse_pct if a else None for a in aggs],
+            "%",
+        )
+        fmt_row(
+            "BE avg latency",
+            [a.be_avg_ms if a else None for a in aggs],
+            "ms",
+        )
+        fmt_row(
+            "BE hosts (avg/worker)",
+            [a.be_hosts_mean if a else None for a in aggs],
+            "",
+        )
+        fmt_row(
+            "as_local() count",
+            [float(a.as_local_n_total) if a else None for a in aggs],
+            "",
+        )
+        fmt_row(
+            "as_local() total avg",
+            [a.as_local_total_ms if a else None for a in aggs],
+            "ms",
+        )
+        fmt_row(
+            "as_local() get avg",
+            [a.as_local_get_ms if a else None for a in aggs],
+            "ms",
+        )
+        fmt_row(
+            "as_local() write avg",
+            [a.as_local_write_ms if a else None for a in aggs],
+            "ms",
+        )
+        fmt_row(
+            "as_local() write net avg",
+            [a.as_local_net_ms if a else None for a in aggs],
+            "ms",
+        )
+        fmt_row(
+            "as_local() write disk avg",
+            [a.as_local_disk_ms if a else None for a in aggs],
+            "ms",
+        )
+        fmt_row(
+            "as_local() agg throughput",
+            [a.as_local_agg_rate if a else None for a in aggs],
+            "/s",
+        )
+        fmt_row(
+            "as_local() median worker rate",
+            [
+                statistics.median(a.as_local_worker_rates)
+                if a and a.as_local_worker_rates
+                else None
+                for a in aggs
+            ],
+            "/s",
+        )
 
 
 def plot_metrics(runs: list[LogMetrics], output_path: Path, show: bool = False) -> None:
@@ -587,10 +989,10 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
         return left_margin + (t - t_min) / (t_max - t_min or 1.0) * plot_w
 
     lines: list[str] = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" ',
         f'viewBox="0 0 {width} {height}" font-family="sans-serif" font-size="12">',
         f'<rect width="100%" height="100%" fill="#ffffff"/>',
-        f'<text x="{width / 2}" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">'
+        f'<text x="{width / 2}" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">',
         f"QuantumGraph Aggregator Scanning Progress &amp; Rate</text>",
     ]
 
@@ -778,6 +1180,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional path to export parsed interval data as CSV.",
     )
     parser.add_argument(
+        "--http-workers",
+        action="store_true",
+        help="Print per-worker HTTP-SUMMARY breakdown table when HTTP-SUMMARY lines are present.",
+    )
+    parser.add_argument(
         "-n",
         "--no-plot",
         action="store_true",
@@ -801,7 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
     verify_versions(runs)
 
     for r in runs:
-        print_single_table(r)
+        print_single_table(r, show_http_workers=args.http_workers)
 
     if len(runs) >= 2:
         print_comparison_table(runs)
