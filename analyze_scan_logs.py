@@ -50,7 +50,7 @@ HTTP_SUMMARY_RE = re.compile(
     r"BE\(new=(\d+)@([\d.]+)ms\s+reuse=(\d+)@([\d.]+)ms\s+pools=(\d+)\s+hosts=(\d+)\)\s+\|\s+"
     r"read\(n=(\d+)\s+avg=([\d.]+)ms\)\s+"
     r"as_local\(n=(\d+)\s+get=([\d.]+)ms\s+write=([\d.]+)ms\s+"
-    r"\[net=([\d.]+)ms\s+disk=([\d.]+)ms\]\s+buf=(\d+)\)\s+"
+    r"(?:\[net=([\d.]+)ms\s+disk=([\d.]+)ms\]\s+)?buf=(\d+)\)\s+"
     r"dav=(\{[^}]*\})"
 )
 
@@ -79,8 +79,8 @@ class HttpSummarySample:
     as_local_n: int
     as_local_get_ms: float
     as_local_write_ms: float
-    as_local_net_ms: float
-    as_local_disk_ms: float
+    as_local_net_ms: float | None
+    as_local_disk_ms: float | None
     as_local_buf: int
     dav: dict[str, int]
 
@@ -137,8 +137,8 @@ class HttpAggregate:
     as_local_n_total: int
     as_local_get_ms: float
     as_local_write_ms: float
-    as_local_net_ms: float
-    as_local_disk_ms: float
+    as_local_net_ms: float | None
+    as_local_disk_ms: float | None
     as_local_total_ms: float
     as_local_bufs: list[int]
     as_local_agg_rate: float
@@ -247,8 +247,18 @@ class LogMetrics:
         al_n_tot = sum(w.as_local_n for w in workers)
         al_get_ms = wavg([(w.as_local_n, w.as_local_get_ms) for w in workers])
         al_write_ms = wavg([(w.as_local_n, w.as_local_write_ms) for w in workers])
-        al_net_ms = wavg([(w.as_local_n, w.as_local_net_ms) for w in workers])
-        al_disk_ms = wavg([(w.as_local_n, w.as_local_disk_ms) for w in workers])
+        net_pairs = [
+            (w.as_local_n, w.as_local_net_ms)
+            for w in workers
+            if w.as_local_net_ms is not None
+        ]
+        disk_pairs = [
+            (w.as_local_n, w.as_local_disk_ms)
+            for w in workers
+            if w.as_local_disk_ms is not None
+        ]
+        al_net_ms = wavg(net_pairs) if net_pairs else None
+        al_disk_ms = wavg(disk_pairs) if disk_pairs else None
 
         worker_rates = [w.as_local_rate for w in workers if w.up_s > 0]
         agg_rate = sum(worker_rates)
@@ -451,8 +461,8 @@ def parse_log(path: Path, label: str | None = None) -> LogMetrics:
                         as_local_n=int(m.group(19)),
                         as_local_get_ms=float(m.group(20)),
                         as_local_write_ms=float(m.group(21)),
-                        as_local_net_ms=float(m.group(22)),
-                        as_local_disk_ms=float(m.group(23)),
+                        as_local_net_ms=float(m.group(22)) if m.group(22) is not None else None,
+                        as_local_disk_ms=float(m.group(23)) if m.group(23) is not None else None,
                         as_local_buf=int(m.group(24)),
                         dav=_safe_literal_dict(m.group(25)),
                     )
@@ -594,10 +604,15 @@ def print_http_summary(m: LogMetrics, show_workers: bool = False) -> None:
             f"  read()                   : n={agg.read_n_total:,d}, avg={agg.read_avg_ms:.1f}ms"
         )
     buf_str = ", ".join(f"{b:,d}B" for b in agg.as_local_bufs)
+    net_disk_str = (
+        f" [net={agg.as_local_net_ms:.1f}ms, disk={agg.as_local_disk_ms:.1f}ms]"
+        if agg.as_local_net_ms is not None and agg.as_local_disk_ms is not None
+        else ""
+    )
     print(
         f"  as_local()               : n={agg.as_local_n_total:,d}, total={agg.as_local_total_ms:.1f}ms "
-        f"(get={agg.as_local_get_ms:.1f}ms + write={agg.as_local_write_ms:.1f}ms "
-        f"[net={agg.as_local_net_ms:.1f}ms, disk={agg.as_local_disk_ms:.1f}ms], buf={buf_str})"
+        f"(get={agg.as_local_get_ms:.1f}ms + write={agg.as_local_write_ms:.1f}ms"
+        f"{net_disk_str}, buf={buf_str})"
     )
     if agg.as_local_worker_rates:
         print(
@@ -625,11 +640,13 @@ def print_http_summary(m: LogMetrics, show_workers: bool = False) -> None:
                 if w.be_total
                 else 0.0
             )
+            net_s = f"{w.as_local_net_ms:6.1f}" if w.as_local_net_ms is not None else f"{'N/A':>6}"
+            disk_s = f"{w.as_local_disk_ms:5.1f}" if w.as_local_disk_ms is not None else f"{'N/A':>5}"
             print(
                 f"  {w.proc:<14} | {w.pid:7d} | {w.up_s:8.1f} | {w.as_local_n:8,d} | "
                 f"{w.as_local_rate:6.2f} | {fe_avg:6.1f} | {w.fe_reuse_pct:4.1f}% | "
                 f"{be_avg:6.1f} | {w.be_reuse_pct:4.1f}% | "
-                f"{w.as_local_get_ms:6.1f} | {w.as_local_net_ms:6.1f} | {w.as_local_disk_ms:5.1f} | {w.be_hosts:5d}"
+                f"{w.as_local_get_ms:6.1f} | {net_s} | {disk_s} | {w.be_hosts:5d}"
             )
 
 
