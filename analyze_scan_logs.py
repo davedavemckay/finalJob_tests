@@ -1595,7 +1595,7 @@ def plot_http_metrics(
     if valid:
         ax3.boxplot(
             [d for _, d in valid],
-            labels=[lbl for lbl, _ in valid],
+            tick_labels=[lbl for lbl, _ in valid],
             showmeans=True,
             patch_artist=True,
             boxprops={"facecolor": "#d9eaf7", "alpha": 0.7},
