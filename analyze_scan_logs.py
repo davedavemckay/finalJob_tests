@@ -299,6 +299,101 @@ class LogMetrics:
             dav_counts=dict(sorted(dav_counts.items())),
         )
 
+    def http_time_bins(self, bin_s: float = 60.0) -> list[HttpTimeBin]:
+        """Compute binned instantaneous HTTP throughput & latency from consecutive per-worker summaries."""
+        if not self.http_summaries or bin_s <= 0:
+            return []
+
+        by_worker: dict[tuple[int, str], list[HttpSummarySample]] = {}
+        for h in self.http_summaries:
+            by_worker.setdefault((h.pid, h.proc), []).append(h)
+
+        n_workers = len(by_worker)
+        # Collect (bin_idx, dn, dt, sum_get_ms, sum_write_ms, d_fe, sum_fe_ms, d_be, sum_be_ms)
+        bins: dict[int, list[tuple[int, float, float, float, int, float, int, float]]] = {}
+
+        for series in by_worker.values():
+            series_sorted = sorted(series, key=lambda x: x.up_s)
+            prev: HttpSummarySample | None = None
+            for curr in series_sorted:
+                if prev is None:
+                    dt = curr.up_s
+                    dn = curr.as_local_n
+                    sum_get = curr.as_local_n * curr.as_local_get_ms
+                    sum_write = curr.as_local_n * curr.as_local_write_ms
+                    d_fe = curr.fe_total
+                    sum_fe = curr.fe_new * curr.fe_new_ms + curr.fe_reuse * curr.fe_reuse_ms
+                    d_be = curr.be_total
+                    sum_be = curr.be_new * curr.be_new_ms + curr.be_reuse * curr.be_reuse_ms
+                    mid_t = curr.up_s / 2.0
+                else:
+                    dt = curr.up_s - prev.up_s
+                    dn = curr.as_local_n - prev.as_local_n
+                    sum_get = (curr.as_local_n * curr.as_local_get_ms) - (
+                        prev.as_local_n * prev.as_local_get_ms
+                    )
+                    sum_write = (curr.as_local_n * curr.as_local_write_ms) - (
+                        prev.as_local_n * prev.as_local_write_ms
+                    )
+                    d_fe = curr.fe_total - prev.fe_total
+                    sum_fe = (
+                        curr.fe_new * curr.fe_new_ms + curr.fe_reuse * curr.fe_reuse_ms
+                    ) - (prev.fe_new * prev.fe_new_ms + prev.fe_reuse * prev.fe_reuse_ms)
+                    d_be = curr.be_total - prev.be_total
+                    sum_be = (
+                        curr.be_new * curr.be_new_ms + curr.be_reuse * curr.be_reuse_ms
+                    ) - (prev.be_new * prev.be_new_ms + prev.be_reuse * prev.be_reuse_ms)
+                    mid_t = (prev.up_s + curr.up_s) / 2.0
+
+                prev = curr
+                if dt < 1.0 or dn < 0:
+                    continue
+                bidx = int(mid_t // bin_s)
+                bins.setdefault(bidx, []).append(
+                    (
+                        dn,
+                        dt,
+                        max(0.0, sum_get),
+                        max(0.0, sum_write),
+                        max(0, d_fe),
+                        max(0.0, sum_fe),
+                        max(0, d_be),
+                        max(0.0, sum_be),
+                    )
+                )
+
+        out: list[HttpTimeBin] = []
+        for bidx in sorted(bins):
+            entries = bins[bidx]
+            tot_dn = sum(e[0] for e in entries)
+            tot_dt = sum(e[1] for e in entries)
+            tot_get = sum(e[2] for e in entries)
+            tot_write = sum(e[3] for e in entries)
+            tot_fe = sum(e[4] for e in entries)
+            tot_fe_ms = sum(e[5] for e in entries)
+            tot_be = sum(e[6] for e in entries)
+            tot_be_ms = sum(e[7] for e in entries)
+
+            # Scale mean per-worker rate in this bin by total worker count
+            agg_rate = (tot_dn / tot_dt) * n_workers if tot_dt > 0 else 0.0
+            get_ms = (tot_get / tot_dn) if tot_dn > 0 else 0.0
+            write_ms = (tot_write / tot_dn) if tot_dn > 0 else 0.0
+            fe_ms = (tot_fe_ms / tot_fe) if tot_fe > 0 else 0.0
+            be_ms = (tot_be_ms / tot_be) if tot_be > 0 else 0.0
+            out.append(
+                HttpTimeBin(
+                    t_min=((bidx + 0.5) * bin_s) / 60.0,
+                    agg_as_local_rate=agg_rate,
+                    as_local_get_ms=get_ms,
+                    as_local_write_ms=write_ms,
+                    as_local_total_ms=get_ms + write_ms,
+                    fe_ms=fe_ms,
+                    be_ms=be_ms,
+                    n_samples=len(entries),
+                )
+            )
+        return out
+
     @property
     def has_version_info(self) -> bool:
         return any(
@@ -395,6 +490,137 @@ class LogMetrics:
             return 0.0
         setup_s = self.defensive_ingest_after_s or 0.0
         return (setup_s + (self.total_quanta / rate)) / 3600.0
+
+
+@dataclass
+class HttpTimeBin:
+    t_min: float
+    agg_as_local_rate: float
+    as_local_get_ms: float
+    as_local_write_ms: float
+    as_local_total_ms: float
+    fe_ms: float
+    be_ms: float
+    n_samples: int
+
+
+@dataclass
+class HttpGroupBin:
+    t_min: float
+    agg_rate_mean: float
+    agg_rate_sd: float
+    total_ms_mean: float
+    total_ms_sd: float
+    get_ms_mean: float
+    write_ms_mean: float
+    fe_ms_mean: float
+    be_ms_mean: float
+
+
+@dataclass
+class StepMean:
+    elapsed_s: float
+    scanned_mean: float
+    scanned_sd: float
+    interval_rate_mean: float
+    interval_rate_sd: float
+    cum_rate_mean: float
+    cum_rate_sd: float
+    n_runs: int
+
+
+@dataclass
+class RunGroup:
+    label: str
+    runs: list[LogMetrics]
+
+    @property
+    def is_multi(self) -> bool:
+        return len(self.runs) > 1
+
+    @property
+    def display_label(self) -> str:
+        return f"{self.label} (n={len(self.runs)})" if self.is_multi else self.label
+
+    def metric_stats(
+        self, getter
+    ) -> tuple[float | None, float | None, float | None, float | None, int]:
+        """Return (mean, stdev, min, max, count) across non-None values in this group."""
+        vals = [v for r in self.runs if (v := getter(r)) is not None]
+        if not vals:
+            return None, None, None, None, 0
+        mean_v = statistics.mean(vals)
+        sd_v = statistics.stdev(vals) if len(vals) >= 2 else None
+        return mean_v, sd_v, min(vals), max(vals), len(vals)
+
+    def min_steps(self) -> int:
+        counts = [len(r.samples) for r in self.runs if r.samples]
+        return min(counts) if counts else 0
+
+    def max_steps(self) -> int:
+        counts = [len(r.samples) for r in self.runs if r.samples]
+        return max(counts) if counts else 0
+
+    def step_series(self) -> list[StepMean]:
+        """Per-step mean & stdev across all replicates that reached each step."""
+        max_n = self.max_steps()
+        out: list[StepMean] = []
+        for i in range(max_n):
+            at_i = [r.samples[i] for r in self.runs if len(r.samples) > i]
+            if not at_i:
+                continue
+            elapsed = statistics.mean(s.elapsed_s for s in at_i)
+            sc = [float(s.scanned) for s in at_i]
+            ir = [s.interval_rate for s in at_i]
+            cr = [s.cumulative_rate for s in at_i]
+            out.append(
+                StepMean(
+                    elapsed_s=elapsed,
+                    scanned_mean=statistics.mean(sc),
+                    scanned_sd=statistics.stdev(sc) if len(sc) >= 2 else 0.0,
+                    interval_rate_mean=statistics.mean(ir),
+                    interval_rate_sd=statistics.stdev(ir) if len(ir) >= 2 else 0.0,
+                    cum_rate_mean=statistics.mean(cr),
+                    cum_rate_sd=statistics.stdev(cr) if len(cr) >= 2 else 0.0,
+                    n_runs=len(at_i),
+                )
+            )
+        return out
+
+    def http_time_series(self, bin_s: float = 60.0) -> list[HttpGroupBin]:
+        """Mean & stdev of binned HTTP metrics across replicates in this group."""
+        by_t: dict[float, list[HttpTimeBin]] = {}
+        for r in self.runs:
+            for b in r.http_time_bins(bin_s=bin_s):
+                by_t.setdefault(round(b.t_min, 4), []).append(b)
+        out: list[HttpGroupBin] = []
+        for t_min in sorted(by_t):
+            bs = by_t[t_min]
+            rates = [b.agg_as_local_rate for b in bs]
+            tots = [b.as_local_total_ms for b in bs]
+            out.append(
+                HttpGroupBin(
+                    t_min=t_min,
+                    agg_rate_mean=statistics.mean(rates),
+                    agg_rate_sd=statistics.stdev(rates) if len(rates) >= 2 else 0.0,
+                    total_ms_mean=statistics.mean(tots),
+                    total_ms_sd=statistics.stdev(tots) if len(tots) >= 2 else 0.0,
+                    get_ms_mean=statistics.mean(b.as_local_get_ms for b in bs),
+                    write_ms_mean=statistics.mean(b.as_local_write_ms for b in bs),
+                    fe_ms_mean=statistics.mean(b.fe_ms for b in bs),
+                    be_ms_mean=statistics.mean(b.be_ms for b in bs),
+                )
+            )
+        return out
+
+    def all_worker_rates(self) -> list[float]:
+        """All per-worker as_local() rates across replicates in this group."""
+        rates: list[float] = []
+        for r in self.runs:
+            agg = r.http_aggregate()
+            if agg:
+                rates.extend(agg.as_local_worker_rates)
+        return rates
 
 
 def parse_log(path: Path, label: str | None = None) -> LogMetrics:
@@ -504,56 +730,75 @@ def parse_log(path: Path, label: str | None = None) -> LogMetrics:
     return metrics
 
 
-def verify_versions(runs: list[LogMetrics]) -> None:
-    """Print a non-fatal verification summary of lsst.resources versions across runs."""
+def verify_versions(groups: list[RunGroup]) -> None:
+    """Print a non-fatal verification summary of lsst.resources versions across run groups."""
     print("\n=== lsst.resources Version Check ===")
-    for r in runs:
-        if not r.has_version_info:
-            print(
-                f"  [{r.label}] INFO: No lsst.resources / eups version lines found in log (continuing)."
-            )
-            continue
+    for g in groups:
+        for r in g.runs:
+            tag = f"{g.label}:{r.path.name}" if g.is_multi else g.label
+            if not r.has_version_info:
+                print(
+                    f"  [{tag}] INFO: No lsst.resources / eups version lines found in log (continuing)."
+                )
+                continue
 
-        print(f"  [{r.label}]")
-        if r.resources_file:
-            print(f"    __file__    : {r.resources_file}")
-        if r.resources_version:
-            print(f"    __version__ : {r.resources_version}")
-        if r.eups_version:
-            tags = f" ({r.eups_tags})" if r.eups_tags else ""
-            print(f"    eups list   : {r.eups_version}{tags}")
-        elif r.eups_error:
-            print(
-                f"    eups list   : {r.eups_error} (tip: EUPS product name is 'resources', not 'lsst_resources')"
-            )
+            print(f"  [{tag}]")
+            if r.resources_file:
+                print(f"    __file__    : {r.resources_file}")
+            if r.resources_version:
+                print(f"    __version__ : {r.resources_version}")
+            if r.eups_version:
+                tags = f" ({r.eups_tags})" if r.eups_tags else ""
+                print(f"    eups list   : {r.eups_version}{tags}")
+            elif r.eups_error:
+                print(
+                    f"    eups list   : {r.eups_error} (tip: EUPS product name is 'resources', not 'lsst_resources')"
+                )
 
-        is_ticket_label = bool(
-            re.search(r"(?:ticket|dm[-_]\d+)", r.label, re.IGNORECASE)
-        )
-        if r.is_local_eups:
-            print(
-                f"    status      : OK - using local EUPS override ({r.eups_version})"
+            is_ticket_label = bool(
+                re.search(r"(?:ticket|dm[-_]\d+)", g.label, re.IGNORECASE)
             )
-        elif r.is_local_file_path is True:
-            print(
-                f"    status      : OK - __file__ points to local checkout ({r.resources_file})"
-            )
-        elif is_ticket_label and (r.eups_version or r.is_local_file_path is False):
-            detail = (
-                f"EUPS='{r.eups_version}'"
-                if r.eups_version
-                else f"__file__='{r.resources_file}'"
-            )
-            print(
-                f"    status      : WARNING - label '{r.label}' looks like a ticket branch, "
-                f"but {detail} appears to be the shared stack install"
-            )
+            if r.is_local_eups:
+                print(
+                    f"    status      : OK - using local EUPS override ({r.eups_version})"
+                )
+            elif r.is_local_file_path is True:
+                print(
+                    f"    status      : OK - __file__ points to local checkout ({r.resources_file})"
+                )
+            elif is_ticket_label and (r.eups_version or r.is_local_file_path is False):
+                detail = (
+                    f"EUPS='{r.eups_version}'"
+                    if r.eups_version
+                    else f"__file__='{r.resources_file}'"
+                )
+                print(
+                    f"    status      : WARNING - label '{g.label}' looks like a ticket branch, "
+                    f"but {detail} appears to be the shared stack install"
+                )
 
-    # If multiple runs have version info, verify they aren't accidentally identical
-    with_info = [r for r in runs if r.has_version_info]
+        # Within-group consistency check for replicates
+        if g.is_multi:
+            rep_versions = {
+                (r.resources_file, r.eups_version)
+                for r in g.runs
+                if r.has_version_info
+            }
+            if len(rep_versions) > 1:
+                print(
+                    f"  [WARNING] Replicates in group '{g.label}' do NOT all share the same "
+                    f"lsst.resources setup!"
+                )
+
+    # Cross-group distinctness check (compare representative run with version info per group)
+    group_reps = [
+        (g.label, next((r for r in g.runs if r.has_version_info), None))
+        for g in groups
+    ]
+    with_info = [(lbl, r) for lbl, r in group_reps if r is not None]
     if len(with_info) >= 2:
-        first = with_info[0]
-        for other in with_info[1:]:
+        first_lbl, first = with_info[0]
+        for other_lbl, other in with_info[1:]:
             same_file = (
                 first.resources_file
                 and other.resources_file
@@ -566,12 +811,12 @@ def verify_versions(runs: list[LogMetrics]) -> None:
             )
             if same_file or same_eups:
                 print(
-                    f"  [WARNING] '{first.label}' and '{other.label}' report the SAME "
+                    f"  [WARNING] '{first_lbl}' and '{other_lbl}' report the SAME "
                     f"lsst.resources setup ({first.version_summary})!"
                 )
             else:
                 print(
-                    f"  [OK] '{first.label}' and '{other.label}' are using distinct "
+                    f"  [OK] '{first_lbl}' and '{other_lbl}' are using distinct "
                     f"lsst.resources versions."
                 )
 
@@ -703,206 +948,196 @@ def print_single_table(m: LogMetrics, show_http_workers: bool = False) -> None:
     print_http_summary(m, show_workers=show_http_workers)
 
 
-def print_comparison_table(runs: list[LogMetrics]) -> None:
-    if len(runs) < 2:
+def print_group_spread(group: RunGroup) -> None:
+    """Print replicate spread (Mean ± Stdev, Min, Max, CV%) for a multi-log group."""
+    if not group.is_multi:
         return
-    base = runs[0]
+    print(f"\n=== Replicate Spread: {group.label} (n={len(group.runs)}) ===")
+    print(
+        f"{'Metric':<32} | {'Mean':>11} | {'Stdev':>10} | {'CV%':>7} | {'Min':>11} | {'Max':>11}"
+    )
+    print("-" * 97)
+
+    def row(name: str, getter, unit: str = "") -> None:
+        mean_v, sd_v, min_v, max_v, n = group.metric_stats(getter)
+        if mean_v is None:
+            return
+        cv_s = f"{100.0 * sd_v / mean_v:6.2f}%" if (sd_v is not None and mean_v != 0) else f"{'N/A':>7}"
+        sd_s = f"{sd_v:7.2f} {unit:<2}" if sd_v is not None else f"{'N/A':>10}"
+        print(
+            f"{name:<32} | {mean_v:8.2f} {unit:<2} | {sd_s} | {cv_s} | "
+            f"{min_v:8.2f} {unit:<2} | {max_v:8.2f} {unit:<2}"
+        )
+
+    row("Read predicted graph", lambda r: r.read_graph_duration_s, "s")
+    row("Analyze -> defensive ingest", lambda r: r.analyze_to_defensive_s, "s")
+    row("Logged pre-scan [after]", lambda r: r.defensive_ingest_after_s, "s")
+    row("Quanta @ 600s", lambda r: float(r.samples[0].scanned) if r.samples else None, "q")
+    row(
+        "Active scan rate @ 600s",
+        lambda r: r.samples[0].scanned / (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0))
+        if r.samples and (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0)) > 0
+        else None,
+        "q/s",
+    )
+    row("Overall rate", lambda r: r.overall_rate if r.samples else None, "q/s")
+    row("Active scan rate (post-setup)", lambda r: r.active_scan_rate if r.samples else None, "q/s")
+    row("Steady-state rate (t>600s)", lambda r: r.steady_state_rate if r.samples else None, "q/s")
+    row("Projected total time", lambda r: r.estimated_total_hours if r.samples else None, "h")
+
+    if any(r.http_summaries for r in group.runs):
+        row("FE avg latency", lambda r: a.fe_avg_ms if (a := r.http_aggregate()) else None, "ms")
+        row("BE avg latency", lambda r: a.be_avg_ms if (a := r.http_aggregate()) else None, "ms")
+        row("as_local() total avg", lambda r: a.as_local_total_ms if (a := r.http_aggregate()) else None, "ms")
+        row("as_local() get avg", lambda r: a.as_local_get_ms if (a := r.http_aggregate()) else None, "ms")
+        row("as_local() write avg", lambda r: a.as_local_write_ms if (a := r.http_aggregate()) else None, "ms")
+        row("as_local() agg throughput", lambda r: a.as_local_agg_rate if (a := r.http_aggregate()) else None, "/s")
+
+
+def print_comparison_table(groups: list[RunGroup]) -> None:
+    if len(groups) < 2:
+        return
+    base = groups[0]
+    any_multi = any(g.is_multi for g in groups)
+    col_w = 22 if any_multi else 16
     print("\n=== Summary Comparison ===")
     header = (
         f"{'Metric':<34} | "
-        + " | ".join(f"{r.label:>16}" for r in runs)
+        + " | ".join(f"{g.display_label:>{col_w}}" for g in groups)
         + (
-            f" | {'Diff (' + runs[1].label + ' vs ' + base.label + ')':>24}"
-            if len(runs) == 2
+            f" | {'Diff (' + groups[1].label + ' vs ' + base.label + ')':>24}"
+            if len(groups) == 2
             else ""
         )
     )
     print(header)
     print("-" * len(header))
 
-    def fmt_row(name: str, vals: list[float | None], unit: str = "") -> None:
-        cells = [
-            f"{v:13.2f} {unit:<2}" if v is not None else f"{'N/A':>16}" for v in vals
-        ]
+    def fmt_row(name: str, getter, unit: str = "") -> None:
+        stats_list = [g.metric_stats(getter) for g in groups]
+        cells: list[str] = []
+        for g, (mean_v, sd_v, _, _, _) in zip(groups, stats_list):
+            if mean_v is None:
+                cells.append(f"{'N/A':>{col_w}}")
+            elif g.is_multi and sd_v is not None:
+                val_s = f"{mean_v:.2f}±{sd_v:.2f}"
+                cells.append(f"{val_s:>{col_w - 3}} {unit:<2}" if unit else f"{val_s:>{col_w}}")
+            else:
+                cells.append(f"{mean_v:{col_w - 3}.2f} {unit:<2}" if unit else f"{mean_v:{col_w}.2f}")
+
         diff_str = ""
-        if len(runs) == 2 and vals[0] is not None and vals[1] is not None:
-            delta = vals[1] - vals[0]
-            if vals[0] != 0:
-                pct = 100.0 * delta / vals[0]
+        m0, m1 = stats_list[0][0], stats_list[1][0] if len(groups) >= 2 else None
+        if len(groups) == 2 and m0 is not None and m1 is not None:
+            delta = m1 - m0
+            if m0 != 0:
+                pct = 100.0 * delta / m0
                 diff_str = f" | {delta:+10.2f} {unit:<2} ({pct:+6.2f}%)"
             else:
                 diff_str = f" | {delta:+10.2f} {unit:<2} (   N/A)"
         print(f"{name:<34} | " + " | ".join(cells) + diff_str)
 
-    fmt_row("Read predicted graph", [r.read_graph_duration_s for r in runs], "s")
-    fmt_row(
-        "Analyze -> defensive ingest", [r.analyze_to_defensive_s for r in runs], "s"
-    )
-    fmt_row("Logged pre-scan [after]", [r.defensive_ingest_after_s for r in runs], "s")
-    fmt_row(
-        "Quanta @ 600s",
-        [float(r.samples[0].scanned) if r.samples else None for r in runs],
-        "q",
-    )
+    fmt_row("Read predicted graph", lambda r: r.read_graph_duration_s, "s")
+    fmt_row("Analyze -> defensive ingest", lambda r: r.analyze_to_defensive_s, "s")
+    fmt_row("Logged pre-scan [after]", lambda r: r.defensive_ingest_after_s, "s")
+    fmt_row("Quanta @ 600s", lambda r: float(r.samples[0].scanned) if r.samples else None, "q")
     fmt_row(
         "Active scan rate @ 600s",
-        [
-            r.samples[0].scanned / (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0))
-            if r.samples and (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0)) > 0
-            else None
-            for r in runs
-        ],
+        lambda r: r.samples[0].scanned / (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0))
+        if r.samples and (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0)) > 0
+        else None,
         "q/s",
     )
 
     # Compare at the last common step when logs have different lengths
-    common_n = min((len(r.samples) for r in runs if r.samples), default=0)
-    if common_n > 0 and len({len(r.samples) for r in runs}) > 1:
-        common_t = runs[0].samples[common_n - 1].elapsed_s
+    all_step_counts = [len(r.samples) for g in groups for r in g.runs if r.samples]
+    common_n = min(all_step_counts) if all_step_counts else 0
+    if common_n > 0 and len(set(all_step_counts)) > 1:
+        common_t = next(r.samples[common_n - 1].elapsed_s for g in groups for r in g.runs if len(r.samples) >= common_n)
         fmt_row(
             f"Quanta @ {common_t:.0f}s (step {common_n})",
-            [float(r.samples[common_n - 1].scanned) for r in runs],
+            lambda r: float(r.samples[common_n - 1].scanned) if len(r.samples) >= common_n else None,
             "q",
         )
         fmt_row(
             f"Steady rate (600s->{common_t:.0f}s)",
-            [
-                (r.samples[common_n - 1].scanned - r.samples[0].scanned)
-                / (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s)
-                if common_n >= 2
-                and (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s) > 0
-                else None
-                for r in runs
-            ],
+            lambda r: (r.samples[common_n - 1].scanned - r.samples[0].scanned)
+            / (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s)
+            if common_n >= 2
+            and len(r.samples) >= common_n
+            and (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s) > 0
+            else None,
             "q/s",
         )
 
-    fmt_row("Final quanta scanned", [float(r.final_scanned) for r in runs], "q")
-    fmt_row("Overall rate", [r.overall_rate for r in runs], "q/s")
-    fmt_row("Active scan rate (post-setup)", [r.active_scan_rate for r in runs], "q/s")
-    fmt_row("Steady-state rate (t>600s)", [r.steady_state_rate for r in runs], "q/s")
-    fmt_row("Projected total time", [r.estimated_total_hours for r in runs], "h")
+    fmt_row("Final quanta scanned", lambda r: float(r.final_scanned) if r.samples else None, "q")
+    fmt_row("Overall rate", lambda r: r.overall_rate if r.samples else None, "q/s")
+    fmt_row("Active scan rate (post-setup)", lambda r: r.active_scan_rate if r.samples else None, "q/s")
+    fmt_row("Steady-state rate (t>600s)", lambda r: r.steady_state_rate if r.samples else None, "q/s")
+    fmt_row("Projected total time", lambda r: r.estimated_total_hours if r.samples else None, "h")
 
-    if len(runs) == 2 and runs[0].samples and runs[1].samples:
-        a, b = runs[0], runs[1]
-        n = min(len(a.samples), len(b.samples))
-        print(f"\n=== Step-by-Step Comparison ({b.label} vs {a.label}) ===")
-        print(
-            f"{'Step':>4} | {'Elapsed (s)':>11} | "
-            f"{a.label + ' Quanta':>16} | {b.label + ' Quanta':>16} | {'Delta Quanta':>12} | "
-            f"{a.label + ' q/s':>14} | {b.label + ' q/s':>16} | {'Delta q/s':>10}"
-        )
-        print("-" * 115)
-        for i in range(n):
-            sa, sb = a.samples[i], b.samples[i]
-            dq = sb.scanned - sa.scanned
-            dr = sb.interval_rate - sa.interval_rate
+    if len(groups) == 2:
+        sa_list = groups[0].step_series()
+        sb_list = groups[1].step_series()
+        n = min(len(sa_list), len(sb_list))
+        if n > 0:
+            a_lbl, b_lbl = groups[0].label, groups[1].label
+            print(f"\n=== Step-by-Step Comparison ({b_lbl} vs {a_lbl}) ===")
             print(
-                f"{i + 1:4d} | {sa.elapsed_s:11.1f} | "
-                f"{sa.scanned:16,d} | {sb.scanned:16,d} | {dq:+12,d} | "
-                f"{sa.interval_rate:14.2f} | {sb.interval_rate:16.2f} | {dr:+10.2f}"
+                f"{'Step':>4} | {'Elapsed (s)':>11} | "
+                f"{a_lbl + ' Quanta':>16} | {b_lbl + ' Quanta':>16} | {'Delta Quanta':>12} | "
+                f"{a_lbl + ' q/s':>14} | {b_lbl + ' q/s':>16} | {'Delta q/s':>10}"
             )
+            print("-" * 115)
+            for i in range(n):
+                sa, sb = sa_list[i], sb_list[i]
+                dq = sb.scanned_mean - sa.scanned_mean
+                dr = sb.interval_rate_mean - sa.interval_rate_mean
+                print(
+                    f"{i + 1:4d} | {sa.elapsed_s:11.1f} | "
+                    f"{round(sa.scanned_mean):16,d} | {round(sb.scanned_mean):16,d} | {round(dq):+12,d} | "
+                    f"{sa.interval_rate_mean:14.2f} | {sb.interval_rate_mean:16.2f} | {dr:+10.2f}"
+                )
 
-    aggs = [r.http_aggregate() for r in runs]
-    if any(a is not None for a in aggs):
+    if any(r.http_summaries for g in groups for r in g.runs):
         print("\n=== HTTP-SUMMARY Comparison ===")
         print(header)
         print("-" * len(header))
-        fmt_row(
-            "HTTP workers",
-            [float(a.worker_count) if a else None for a in aggs],
-            "",
-        )
-        fmt_row(
-            "Total HTTP requests",
-            [float(a.total_reqs) if a else None for a in aggs],
-            "",
-        )
-        fmt_row(
-            "FE reuse rate",
-            [a.fe_reuse_pct if a else None for a in aggs],
-            "%",
-        )
-        fmt_row(
-            "FE avg latency",
-            [a.fe_avg_ms if a else None for a in aggs],
-            "ms",
-        )
-        fmt_row(
-            "BE reuse rate",
-            [a.be_reuse_pct if a else None for a in aggs],
-            "%",
-        )
-        fmt_row(
-            "BE avg latency",
-            [a.be_avg_ms if a else None for a in aggs],
-            "ms",
-        )
-        fmt_row(
-            "BE hosts (avg/worker)",
-            [a.be_hosts_mean if a else None for a in aggs],
-            "",
-        )
-        fmt_row(
-            "as_local() count",
-            [float(a.as_local_n_total) if a else None for a in aggs],
-            "",
-        )
-        fmt_row(
-            "as_local() total avg",
-            [a.as_local_total_ms if a else None for a in aggs],
-            "ms",
-        )
-        fmt_row(
-            "as_local() get avg",
-            [a.as_local_get_ms if a else None for a in aggs],
-            "ms",
-        )
-        fmt_row(
-            "as_local() write avg",
-            [a.as_local_write_ms if a else None for a in aggs],
-            "ms",
-        )
-        fmt_row(
-            "as_local() write net avg",
-            [a.as_local_net_ms if a else None for a in aggs],
-            "ms",
-        )
-        fmt_row(
-            "as_local() write disk avg",
-            [a.as_local_disk_ms if a else None for a in aggs],
-            "ms",
-        )
-        fmt_row(
-            "as_local() agg throughput",
-            [a.as_local_agg_rate if a else None for a in aggs],
-            "/s",
-        )
+        fmt_row("HTTP workers", lambda r: float(a.worker_count) if (a := r.http_aggregate()) else None, "")
+        fmt_row("Total HTTP requests", lambda r: float(a.total_reqs) if (a := r.http_aggregate()) else None, "")
+        fmt_row("FE reuse rate", lambda r: a.fe_reuse_pct if (a := r.http_aggregate()) else None, "%")
+        fmt_row("FE avg latency", lambda r: a.fe_avg_ms if (a := r.http_aggregate()) else None, "ms")
+        fmt_row("BE reuse rate", lambda r: a.be_reuse_pct if (a := r.http_aggregate()) else None, "%")
+        fmt_row("BE avg latency", lambda r: a.be_avg_ms if (a := r.http_aggregate()) else None, "ms")
+        fmt_row("BE hosts (avg/worker)", lambda r: a.be_hosts_mean if (a := r.http_aggregate()) else None, "")
+        fmt_row("as_local() count", lambda r: float(a.as_local_n_total) if (a := r.http_aggregate()) else None, "")
+        fmt_row("as_local() total avg", lambda r: a.as_local_total_ms if (a := r.http_aggregate()) else None, "ms")
+        fmt_row("as_local() get avg", lambda r: a.as_local_get_ms if (a := r.http_aggregate()) else None, "ms")
+        fmt_row("as_local() write avg", lambda r: a.as_local_write_ms if (a := r.http_aggregate()) else None, "ms")
+        fmt_row("as_local() write net avg", lambda r: a.as_local_net_ms if (a := r.http_aggregate()) else None, "ms")
+        fmt_row("as_local() write disk avg", lambda r: a.as_local_disk_ms if (a := r.http_aggregate()) else None, "ms")
+        fmt_row("as_local() agg throughput", lambda r: a.as_local_agg_rate if (a := r.http_aggregate()) else None, "/s")
         fmt_row(
             "as_local() median worker rate",
-            [
-                statistics.median(a.as_local_worker_rates)
-                if a and a.as_local_worker_rates
-                else None
-                for a in aggs
-            ],
+            lambda r: statistics.median(a.as_local_worker_rates)
+            if (a := r.http_aggregate()) and a.as_local_worker_rates
+            else None,
             "/s",
         )
 
 
-def plot_metrics(runs: list[LogMetrics], output_path: Path, show: bool = False) -> None:
+def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) -> None:
     try:
         import matplotlib.pyplot as plt
     except ImportError:
         svg_path = output_path.with_suffix(".svg")
-        _write_svg_fallback(runs, svg_path)
+        _write_svg_fallback(groups, svg_path)
         print(
             f"\n[NOTE] matplotlib is not installed in {sys.executable}; "
             f"wrote standalone SVG plot to {svg_path}"
         )
         return
 
-    has_comparison = len(runs) >= 2
+    has_comparison = len(groups) >= 2
     nrows = 3 if has_comparison else 2
     fig, axes = plt.subplots(nrows, 1, figsize=(10, 3.6 * nrows), sharex=True)
     if nrows == 1:
@@ -910,17 +1145,35 @@ def plot_metrics(runs: list[LogMetrics], output_path: Path, show: bool = False) 
 
     # Panel 1: Cumulative quanta scanned vs time
     ax0 = axes[0]
-    for r in runs:
-        t_hr = [s.elapsed_s / 3600.0 for s in r.samples]
-        q_k = [s.scanned / 1e3 for s in r.samples]
-        ax0.plot(
+    for g in groups:
+        series = g.step_series()
+        t_hr = [s.elapsed_s / 3600.0 for s in series]
+        q_k = [s.scanned_mean / 1e3 for s in series]
+        mean_rate, sd_rate, _, _, _ = g.metric_stats(
+            lambda r: r.overall_rate if r.samples else None
+        )
+        rate_str = (
+            f"{mean_rate:.2f}±{sd_rate:.2f} q/s"
+            if (g.is_multi and mean_rate is not None and sd_rate is not None)
+            else f"{(mean_rate or 0.0):.2f} q/s"
+        )
+        (line,) = ax0.plot(
             t_hr,
             q_k,
             marker="o",
             markersize=3.5,
-            linewidth=1.8,
-            label=f"{r.label} ({r.overall_rate:.2f} q/s)",
+            linewidth=2.0,
+            label=f"{g.display_label} ({rate_str})",
         )
+        color = line.get_color()
+        if g.is_multi:
+            for r in g.runs:
+                rt = [s.elapsed_s / 3600.0 for s in r.samples]
+                rq = [s.scanned / 1e3 for s in r.samples]
+                ax0.plot(rt, rq, linewidth=0.9, alpha=0.35, color=color)
+            lo = [(s.scanned_mean - s.scanned_sd) / 1e3 for s in series]
+            hi = [(s.scanned_mean + s.scanned_sd) / 1e3 for s in series]
+            ax0.fill_between(t_hr, lo, hi, color=color, alpha=0.15)
     ax0.set_ylabel("Scanned Quanta (thousands)")
     ax0.set_title("QuantumGraph Aggregator Scanning Progress & Rate")
     ax0.grid(True, linestyle="--", alpha=0.5)
@@ -928,47 +1181,59 @@ def plot_metrics(runs: list[LogMetrics], output_path: Path, show: bool = False) 
 
     # Panel 2: Interval & Cumulative scanning rate vs time
     ax1 = axes[1]
-    for r in runs:
-        t_hr = [s.elapsed_s / 3600.0 for s in r.samples]
-        int_rate = [s.interval_rate for s in r.samples]
-        cum_rate = [s.cumulative_rate for s in r.samples]
-        line = ax1.plot(
+    for g in groups:
+        series = g.step_series()
+        t_hr = [s.elapsed_s / 3600.0 for s in series]
+        int_rate = [s.interval_rate_mean for s in series]
+        cum_rate = [s.cum_rate_mean for s in series]
+        (line,) = ax1.plot(
             t_hr,
             int_rate,
             marker="o",
             markersize=3.5,
-            linewidth=1.5,
-            label=f"{r.label} interval rate",
+            linewidth=1.8,
+            label=f"{g.display_label} interval rate",
         )
+        color = line.get_color()
         ax1.plot(
             t_hr,
             cum_rate,
             linestyle="--",
             linewidth=1.2,
-            color=line[0].get_color(),
+            color=color,
             alpha=0.8,
-            label=f"{r.label} cumulative rate",
+            label=f"{g.display_label} cumulative rate",
         )
+        if g.is_multi:
+            for r in g.runs:
+                rt = [s.elapsed_s / 3600.0 for s in r.samples]
+                ri = [s.interval_rate for s in r.samples]
+                ax1.plot(rt, ri, linewidth=0.8, alpha=0.30, color=color)
+            lo = [s.interval_rate_mean - s.interval_rate_sd for s in series]
+            hi = [s.interval_rate_mean + s.interval_rate_sd for s in series]
+            ax1.fill_between(t_hr, lo, hi, color=color, alpha=0.15)
     ax1.set_ylabel("Scan Rate (quanta / s)")
     ax1.grid(True, linestyle="--", alpha=0.5)
     ax1.legend(loc="lower right", ncol=2, fontsize="small")
 
-    # Panel 3: Delta between runs (if 2+ runs provided)
+    # Panel 3: Delta between group means (if 2+ groups provided)
     if has_comparison:
         ax2 = axes[2]
-        base = runs[0]
-        for r in runs[1:]:
-            n = min(len(base.samples), len(r.samples))
-            t_hr = [base.samples[i].elapsed_s / 3600.0 for i in range(n)]
-            dq = [r.samples[i].scanned - base.samples[i].scanned for i in range(n)]
+        base = groups[0]
+        base_series = base.step_series()
+        for g in groups[1:]:
+            g_series = g.step_series()
+            n = min(len(base_series), len(g_series))
+            t_hr = [base_series[i].elapsed_s / 3600.0 for i in range(n)]
+            dq = [g_series[i].scanned_mean - base_series[i].scanned_mean for i in range(n)]
             ax2.plot(
                 t_hr,
                 dq,
                 marker="s",
                 markersize=3.5,
                 linewidth=1.6,
-                color="tab:green" if len(runs) == 2 else None,
-                label=f"{r.label} - {base.label} (quanta lead)",
+                color="tab:green" if len(groups) == 2 else None,
+                label=f"{g.label} - {base.label} (quanta lead)",
             )
         ax2.axhline(0, color="black", linewidth=0.8, linestyle=":")
         ax2.set_ylabel("Quanta Difference")
@@ -984,10 +1249,10 @@ def plot_metrics(runs: list[LogMetrics], output_path: Path, show: bool = False) 
     plt.close(fig)
 
 
-def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
+def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
     """Generate a clean multi-panel SVG plot using only the Python standard library."""
-    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
-    has_comp = len(runs) >= 2
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+    has_comp = len(groups) >= 2
     width = 860
     panel_h = 220
     gap = 45
@@ -999,7 +1264,8 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
     height = top_margin + nrows * panel_h + (nrows - 1) * gap + bottom_margin
     plot_w = width - left_margin - right_margin
 
-    all_t = [s.elapsed_s / 3600.0 for r in runs for s in r.samples] or [0.0, 1.0]
+    all_runs = [r for g in groups for r in g.runs]
+    all_t = [s.elapsed_s / 3600.0 for r in all_runs for s in r.samples] or [0.0, 1.0]
     t_min, t_max = 0.0, max(all_t) * 1.02
 
     def sx(t: float) -> float:
@@ -1018,14 +1284,13 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
         y_min: float,
         y_max: float,
         ylabel: str,
-        series: list[tuple[str, list[tuple[float, float]], str, str]],
+        series: list[tuple[str | None, list[tuple[float, float]], str, str, float]],
     ) -> None:
         y0 = top_margin + row * (panel_h + gap)
         lines.append(
             f'<rect x="{left_margin}" y="{y0}" width="{plot_w}" height="{panel_h}" '
             f'fill="#fafafa" stroke="#cccccc" stroke-width="1"/>'
         )
-        # Grid and Y ticks
         for i in range(5):
             frac = i / 4.0
             val = y_min + frac * (y_max - y_min)
@@ -1038,7 +1303,6 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
                 f'<text x="{left_margin - 8}" y="{py + 4:.1f}" text-anchor="end" fill="#555" font-size="11">'
                 f"{val:,.1f}</text>"
             )
-        # X ticks
         n_xticks = 6
         for i in range(n_xticks + 1):
             frac = i / n_xticks
@@ -1053,7 +1317,6 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
                     f'<text x="{px:.1f}" y="{y0 + panel_h + 18}" text-anchor="middle" fill="#555" font-size="11">'
                     f"{t_val:.1f}h</text>"
                 )
-        # Y axis label
         cy = y0 + panel_h / 2
         lines.append(
             f'<text x="20" y="{cy:.1f}" text-anchor="middle" fill="#222" font-size="12" '
@@ -1063,94 +1326,121 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
         def sy(v: float) -> float:
             return y0 + panel_h - (v - y_min) / (y_max - y_min or 1.0) * panel_h
 
-        # Plot series
         legend_x = left_margin + 14
         legend_y = y0 + 20
-        for name, pts, color, dash in series:
+        for name, pts, color, dash, opacity in series:
             if not pts:
                 continue
             poly = " ".join(f"{sx(t):.1f},{sy(v):.1f}" for t, v in pts)
             dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+            sw = "1.0" if opacity < 0.9 else "2.0"
             lines.append(
-                f'<polyline fill="none" stroke="{color}" stroke-width="2"{dash_attr} points="{poly}"/>'
+                f'<polyline fill="none" stroke="{color}" stroke-width="{sw}" '
+                f'stroke-opacity="{opacity:.2f}"{dash_attr} points="{poly}"/>'
             )
-            if not dash:
+            if not dash and opacity >= 0.9:
                 for t, v in pts:
                     lines.append(
                         f'<circle cx="{sx(t):.1f}" cy="{sy(v):.1f}" r="2.8" fill="{color}"/>'
                     )
-            lines.append(
-                f'<line x1="{legend_x}" y1="{legend_y - 4}" x2="{legend_x + 20}" y2="{legend_y - 4}" '
-                f'stroke="{color}" stroke-width="2"{dash_attr}/>'
-            )
-            lines.append(
-                f'<text x="{legend_x + 26}" y="{legend_y}" fill="#222" font-size="11">{name}</text>'
-            )
-            legend_y += 18
+            if name:
+                lines.append(
+                    f'<line x1="{legend_x}" y1="{legend_y - 4}" x2="{legend_x + 20}" y2="{legend_y - 4}" '
+                    f'stroke="{color}" stroke-width="2"{dash_attr}/>'
+                )
+                lines.append(
+                    f'<text x="{legend_x + 26}" y="{legend_y}" fill="#222" font-size="11">{name}</text>'
+                )
+                legend_y += 18
 
     # Panel 1: Cumulative Quanta (thousands)
     max_q_k = (
-        max((s.scanned / 1e3 for r in runs for s in r.samples), default=1.0) * 1.08
+        max((s.scanned / 1e3 for r in all_runs for s in r.samples), default=1.0) * 1.08
     )
-    p1_series = [
-        (
-            f"{r.label} ({r.overall_rate:.2f} q/s)",
-            [(s.elapsed_s / 3600.0, s.scanned / 1e3) for s in r.samples],
-            colors[idx % len(colors)],
-            "",
+    p1_series = []
+    for idx, g in enumerate(groups):
+        c = colors[idx % len(colors)]
+        if g.is_multi:
+            for r in g.runs:
+                p1_series.append(
+                    (None, [(s.elapsed_s / 3600.0, s.scanned / 1e3) for s in r.samples], c, "", 0.35)
+                )
+        mean_r, sd_r, _, _, _ = g.metric_stats(lambda r: r.overall_rate if r.samples else None)
+        rate_s = (
+            f"{mean_r:.2f}±{sd_r:.2f} q/s"
+            if (g.is_multi and mean_r is not None and sd_r is not None)
+            else f"{(mean_r or 0.0):.2f} q/s"
         )
-        for idx, r in enumerate(runs)
-    ]
+        p1_series.append(
+            (
+                f"{g.display_label} ({rate_s})",
+                [(s.elapsed_s / 3600.0, s.scanned_mean / 1e3) for s in g.step_series()],
+                c,
+                "",
+                1.0,
+            )
+        )
     draw_panel(0, 0.0, max_q_k, "Scanned Quanta (k)", p1_series)
 
     # Panel 2: Interval & Cumulative Rate
-    all_rates = [s.interval_rate for r in runs for s in r.samples] + [
-        s.cumulative_rate for r in runs for s in r.samples
+    all_rates = [s.interval_rate for r in all_runs for s in r.samples] + [
+        s.cumulative_rate for r in all_runs for s in r.samples
     ]
     r_min = max(0.0, min(all_rates, default=0.0) - 1.5)
     r_max = max(all_rates, default=1.0) + 1.5
     p2_series = []
-    for idx, r in enumerate(runs):
+    for idx, g in enumerate(groups):
         c = colors[idx % len(colors)]
+        if g.is_multi:
+            for r in g.runs:
+                p2_series.append(
+                    (None, [(s.elapsed_s / 3600.0, s.interval_rate) for s in r.samples], c, "", 0.30)
+                )
+        series = g.step_series()
         p2_series.append(
             (
-                f"{r.label} interval rate",
-                [(s.elapsed_s / 3600.0, s.interval_rate) for s in r.samples],
+                f"{g.display_label} interval rate",
+                [(s.elapsed_s / 3600.0, s.interval_rate_mean) for s in series],
                 c,
                 "",
+                1.0,
             )
         )
         p2_series.append(
             (
-                f"{r.label} cumulative rate",
-                [(s.elapsed_s / 3600.0, s.cumulative_rate) for s in r.samples],
+                f"{g.display_label} cumulative rate",
+                [(s.elapsed_s / 3600.0, s.cum_rate_mean) for s in series],
                 c,
                 "5,4",
+                1.0,
             )
         )
     draw_panel(1, r_min, r_max, "Rate (quanta / s)", p2_series)
 
     # Panel 3: Quanta Lead
     if has_comp:
-        base = runs[0]
+        base = groups[0]
+        base_s = base.step_series()
         p3_series = []
         all_dq = [0.0]
-        for idx, r in enumerate(runs[1:], start=1):
-            n = min(len(base.samples), len(r.samples))
+        for idx, g in enumerate(groups[1:], start=1):
+            g_s = g.step_series()
+            n = min(len(base_s), len(g_s))
             pts = [
                 (
-                    base.samples[i].elapsed_s / 3600.0,
-                    float(r.samples[i].scanned - base.samples[i].scanned),
+                    base_s[i].elapsed_s / 3600.0,
+                    float(g_s[i].scanned_mean - base_s[i].scanned_mean),
                 )
                 for i in range(n)
             ]
             all_dq.extend(v for _, v in pts)
             p3_series.append(
                 (
-                    f"{r.label} - {base.label} (quanta)",
+                    f"{g.label} - {base.label} (quanta)",
                     pts,
                     colors[(idx + 1) % len(colors)],
                     "",
+                    1.0,
                 )
             )
         dq_min = min(all_dq) - 50.0
@@ -1165,13 +1455,366 @@ def _write_svg_fallback(runs: list[LogMetrics], svg_path: Path) -> None:
     svg_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def parse_input_spec(spec: str) -> tuple[str, Path]:
-    """Parse 'label=path' or 'path'."""
+def plot_http_metrics(
+    groups: list[RunGroup],
+    output_path: Path,
+    bin_s: float = 60.0,
+    show: bool = False,
+) -> None:
+    """Plot high-resolution HTTP-SUMMARY time-series and per-worker distributions."""
+    http_groups = [g for g in groups if any(r.http_summaries for r in g.runs)]
+    if not http_groups:
+        return
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        svg_path = output_path.with_suffix(".svg")
+        _write_http_svg_fallback(http_groups, svg_path, bin_s=bin_s)
+        print(
+            f"[NOTE] matplotlib is not installed in {sys.executable}; "
+            f"wrote standalone HTTP-SUMMARY SVG plot to {svg_path}"
+        )
+        return
+
+    fig, axes = plt.subplots(4, 1, figsize=(11, 13.5))
+    ax0, ax1, ax2, ax3 = axes
+
+    # Panel 1: Binned aggregate as_local() throughput over time
+    for g in http_groups:
+        series = g.http_time_series(bin_s=bin_s)
+        if not series:
+            continue
+        t_m = [b.t_min for b in series]
+        rates = [b.agg_rate_mean for b in series]
+        (line,) = ax0.plot(
+            t_m,
+            rates,
+            marker="o",
+            markersize=3.0,
+            linewidth=2.0,
+            label=g.display_label,
+        )
+        color = line.get_color()
+        if g.is_multi:
+            for r in g.runs:
+                rb = r.http_time_bins(bin_s=bin_s)
+                ax0.plot(
+                    [b.t_min for b in rb],
+                    [b.agg_as_local_rate for b in rb],
+                    linewidth=0.8,
+                    alpha=0.35,
+                    color=color,
+                )
+            lo = [b.agg_rate_mean - b.agg_rate_sd for b in series]
+            hi = [b.agg_rate_mean + b.agg_rate_sd for b in series]
+            ax0.fill_between(t_m, lo, hi, color=color, alpha=0.15)
+    ax0.set_title(f"HTTP-SUMMARY High-Resolution Diagnostics ({bin_s:.0f}s bins)")
+    ax0.set_ylabel("Aggregate as_local() (files / s)")
+    ax0.set_xlabel("Worker Uptime (minutes)")
+    ax0.grid(True, linestyle="--", alpha=0.5)
+    ax0.legend(loc="best")
+
+    # Panel 2: Binned as_local() latency breakdown (total, get, write)
+    for g in http_groups:
+        series = g.http_time_series(bin_s=bin_s)
+        if not series:
+            continue
+        t_m = [b.t_min for b in series]
+        (line,) = ax1.plot(
+            t_m,
+            [b.total_ms_mean for b in series],
+            linewidth=2.0,
+            label=f"{g.display_label} total",
+        )
+        color = line.get_color()
+        ax1.plot(
+            t_m,
+            [b.get_ms_mean for b in series],
+            linestyle="--",
+            linewidth=1.3,
+            color=color,
+            alpha=0.85,
+            label=f"{g.display_label} get",
+        )
+        ax1.plot(
+            t_m,
+            [b.write_ms_mean for b in series],
+            linestyle=":",
+            linewidth=1.3,
+            color=color,
+            alpha=0.85,
+            label=f"{g.display_label} write",
+        )
+        if g.is_multi:
+            lo = [b.total_ms_mean - b.total_ms_sd for b in series]
+            hi = [b.total_ms_mean + b.total_ms_sd for b in series]
+            ax1.fill_between(t_m, lo, hi, color=color, alpha=0.12)
+    ax1.set_ylabel("as_local() Latency (ms)")
+    ax1.set_xlabel("Worker Uptime (minutes)")
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    ax1.legend(loc="best", ncol=3, fontsize="small")
+
+    # Panel 3: Binned FE & BE latency over time
+    for g in http_groups:
+        series = g.http_time_series(bin_s=bin_s)
+        if not series:
+            continue
+        t_m = [b.t_min for b in series]
+        fe_reuse, _, _, _, _ = g.metric_stats(
+            lambda r: a.fe_reuse_pct if (a := r.http_aggregate()) else None
+        )
+        be_reuse, _, _, _, _ = g.metric_stats(
+            lambda r: a.be_reuse_pct if (a := r.http_aggregate()) else None
+        )
+        (line,) = ax2.plot(
+            t_m,
+            [b.be_ms_mean for b in series],
+            linewidth=1.8,
+            label=f"{g.display_label} BE (reuse {(be_reuse or 0.0):.0f}%)",
+        )
+        color = line.get_color()
+        ax2.plot(
+            t_m,
+            [b.fe_ms_mean for b in series],
+            linestyle="--",
+            linewidth=1.4,
+            color=color,
+            alpha=0.85,
+            label=f"{g.display_label} FE (reuse {(fe_reuse or 0.0):.0f}%)",
+        )
+    ax2.set_ylabel("FE / BE Latency (ms)")
+    ax2.set_xlabel("Worker Uptime (minutes)")
+    ax2.grid(True, linestyle="--", alpha=0.5)
+    ax2.legend(loc="best", ncol=2, fontsize="small")
+
+    # Panel 4: Per-worker as_local() rate distribution (boxplot)
+    box_data = [g.all_worker_rates() for g in http_groups]
+    box_labels = [f"{g.display_label}\n({len(d)} workers)" for g, d in zip(http_groups, box_data)]
+    valid = [(lbl, d) for lbl, d in zip(box_labels, box_data) if d]
+    if valid:
+        ax3.boxplot(
+            [d for _, d in valid],
+            labels=[lbl for lbl, _ in valid],
+            showmeans=True,
+            patch_artist=True,
+            boxprops={"facecolor": "#d9eaf7", "alpha": 0.7},
+        )
+    ax3.set_ylabel("Per-Worker as_local() (files / s)")
+    ax3.set_title("Per-Worker Throughput Distribution (All Workers Across Replicates)")
+    ax3.grid(True, axis="y", linestyle="--", alpha=0.5)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    print(f"Saved HTTP-SUMMARY plot to {output_path}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def _write_http_svg_fallback(
+    groups: list[RunGroup], svg_path: Path, bin_s: float = 60.0
+) -> None:
+    """Generate a standalone 4-panel SVG for HTTP-SUMMARY diagnostics without matplotlib."""
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+    width = 900
+    panel_h = 210
+    gap = 48
+    top_margin = 50
+    bottom_margin = 55
+    left_margin = 80
+    right_margin = 30
+    nrows = 4
+    height = top_margin + nrows * panel_h + (nrows - 1) * gap + bottom_margin
+    plot_w = width - left_margin - right_margin
+
+    group_series = [(g, g.http_time_series(bin_s=bin_s)) for g in groups]
+    all_t = [b.t_min for _, s in group_series for b in s] or [0.0, 1.0]
+    t_min, t_max = 0.0, max(all_t) * 1.03
+
+    def sx(t: float) -> float:
+        return left_margin + (t - t_min) / (t_max - t_min or 1.0) * plot_w
+
+    lines: list[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" font-family="sans-serif" font-size="12">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{width / 2}" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">'
+        f"HTTP-SUMMARY High-Resolution Diagnostics ({bin_s:.0f}s bins)</text>",
+    ]
+
+    def draw_ts_panel(
+        row: int,
+        y_min: float,
+        y_max: float,
+        ylabel: str,
+        series: list[tuple[str | None, list[tuple[float, float]], str, str, float]],
+    ) -> None:
+        y0 = top_margin + row * (panel_h + gap)
+        lines.append(
+            f'<rect x="{left_margin}" y="{y0}" width="{plot_w}" height="{panel_h}" '
+            f'fill="#fafafa" stroke="#cccccc" stroke-width="1"/>'
+        )
+        for i in range(5):
+            frac = i / 4.0
+            val = y_min + frac * (y_max - y_min)
+            py = y0 + panel_h - frac * panel_h
+            lines.append(
+                f'<line x1="{left_margin}" y1="{py:.1f}" x2="{left_margin + plot_w}" y2="{py:.1f}" '
+                f'stroke="#e5e5e5" stroke-dasharray="3,3"/>'
+            )
+            lines.append(
+                f'<text x="{left_margin - 8}" y="{py + 4:.1f}" text-anchor="end" fill="#555" font-size="11">'
+                f"{val:,.1f}</text>"
+            )
+        for i in range(7):
+            frac = i / 6.0
+            tv = t_min + frac * (t_max - t_min)
+            px = sx(tv)
+            lines.append(
+                f'<line x1="{px:.1f}" y1="{y0}" x2="{px:.1f}" y2="{y0 + panel_h}" '
+                f'stroke="#e5e5e5" stroke-dasharray="3,3"/>'
+            )
+            lines.append(
+                f'<text x="{px:.1f}" y="{y0 + panel_h + 15}" text-anchor="middle" fill="#555" font-size="10">'
+                f"{tv:.0f}m</text>"
+            )
+        cy = y0 + panel_h / 2
+        lines.append(
+            f'<text x="20" y="{cy:.1f}" text-anchor="middle" fill="#222" font-size="12" '
+            f'transform="rotate(-90 20 {cy:.1f})">{ylabel}</text>'
+        )
+
+        def sy(v: float) -> float:
+            return y0 + panel_h - (v - y_min) / (y_max - y_min or 1.0) * panel_h
+
+        legend_x = left_margin + 12
+        legend_y = y0 + 18
+        for name, pts, color, dash, opacity in series:
+            if not pts:
+                continue
+            poly = " ".join(f"{sx(t):.1f},{sy(v):.1f}" for t, v in pts)
+            dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+            sw = "1.0" if opacity < 0.9 else "1.8"
+            lines.append(
+                f'<polyline fill="none" stroke="{color}" stroke-width="{sw}" '
+                f'stroke-opacity="{opacity:.2f}"{dash_attr} points="{poly}"/>'
+            )
+            if name:
+                lines.append(
+                    f'<line x1="{legend_x}" y1="{legend_y - 4}" x2="{legend_x + 18}" y2="{legend_y - 4}" '
+                    f'stroke="{color}" stroke-width="2"{dash_attr}/>'
+                )
+                lines.append(
+                    f'<text x="{legend_x + 24}" y="{legend_y}" fill="#222" font-size="10">{name}</text>'
+                )
+                legend_y += 15
+
+    # Panel 1: Aggregate as_local() throughput
+    all_rates = [b.agg_rate_mean for _, s in group_series for b in s] or [1.0]
+    p1 = []
+    for idx, (g, s) in enumerate(group_series):
+        c = colors[idx % len(colors)]
+        if g.is_multi:
+            for r in g.runs:
+                rb = r.http_time_bins(bin_s=bin_s)
+                p1.append((None, [(b.t_min, b.agg_as_local_rate) for b in rb], c, "", 0.30))
+        p1.append((g.display_label, [(b.t_min, b.agg_rate_mean) for b in s], c, "", 1.0))
+    draw_ts_panel(0, 0.0, max(all_rates) * 1.12, "Agg as_local (files/s)", p1)
+
+    # Panel 2: as_local() total / get / write latency
+    all_lat = [b.total_ms_mean for _, s in group_series for b in s] or [1.0]
+    p2 = []
+    for idx, (g, s) in enumerate(group_series):
+        c = colors[idx % len(colors)]
+        p2.append((f"{g.display_label} total", [(b.t_min, b.total_ms_mean) for b in s], c, "", 1.0))
+        p2.append((f"{g.display_label} get", [(b.t_min, b.get_ms_mean) for b in s], c, "5,3", 0.9))
+        p2.append((f"{g.display_label} write", [(b.t_min, b.write_ms_mean) for b in s], c, "2,2", 0.9))
+    draw_ts_panel(1, 0.0, max(all_lat) * 1.15, "as_local Latency (ms)", p2)
+
+    # Panel 3: FE & BE latency
+    all_fb = [v for _, s in group_series for b in s for v in (b.fe_ms_mean, b.be_ms_mean)] or [1.0]
+    p3 = []
+    for idx, (g, s) in enumerate(group_series):
+        c = colors[idx % len(colors)]
+        p3.append((f"{g.display_label} BE", [(b.t_min, b.be_ms_mean) for b in s], c, "", 1.0))
+        p3.append((f"{g.display_label} FE", [(b.t_min, b.fe_ms_mean) for b in s], c, "5,3", 0.9))
+    draw_ts_panel(2, 0.0, max(all_fb) * 1.15, "FE / BE Latency (ms)", p3)
+
+    # Panel 4: Per-worker rate distribution (dot + median/IQR bar per group)
+    y0 = top_margin + 3 * (panel_h + gap)
+    lines.append(
+        f'<rect x="{left_margin}" y="{y0}" width="{plot_w}" height="{panel_h}" '
+        f'fill="#fafafa" stroke="#cccccc" stroke-width="1"/>'
+    )
+    all_wr = [v for g in groups for v in g.all_worker_rates()] or [1.0]
+    w_max = max(all_wr) * 1.15
+    for i in range(5):
+        frac = i / 4.0
+        val = frac * w_max
+        py = y0 + panel_h - frac * panel_h
+        lines.append(
+            f'<line x1="{left_margin}" y1="{py:.1f}" x2="{left_margin + plot_w}" y2="{py:.1f}" '
+            f'stroke="#e5e5e5" stroke-dasharray="3,3"/>'
+        )
+        lines.append(
+            f'<text x="{left_margin - 8}" y="{py + 4:.1f}" text-anchor="end" fill="#555" font-size="11">'
+            f"{val:.2f}</text>"
+        )
+    cy = y0 + panel_h / 2
+    lines.append(
+        f'<text x="20" y="{cy:.1f}" text-anchor="middle" fill="#222" font-size="12" '
+        f'transform="rotate(-90 20 {cy:.1f})">Worker Rate (files/s)</text>'
+    )
+    n_g = len(groups)
+    for idx, g in enumerate(groups):
+        wr = sorted(g.all_worker_rates())
+        cx = left_margin + (idx + 0.5) * (plot_w / max(n_g, 1))
+        c = colors[idx % len(colors)]
+        if wr:
+            def wy(v: float) -> float:
+                return y0 + panel_h - (v / (w_max or 1.0)) * panel_h
+
+            med = statistics.median(wr)
+            q1 = wr[len(wr) // 4]
+            q3 = wr[(3 * len(wr)) // 4]
+            # Whisker min..max
+            lines.append(
+                f'<line x1="{cx:.1f}" y1="{wy(wr[0]):.1f}" x2="{cx:.1f}" y2="{wy(wr[-1]):.1f}" '
+                f'stroke="{c}" stroke-width="1.5"/>'
+            )
+            # IQR box
+            box_w = min(50.0, (plot_w / max(n_g, 1)) * 0.35)
+            lines.append(
+                f'<rect x="{cx - box_w / 2:.1f}" y="{wy(q3):.1f}" width="{box_w:.1f}" '
+                f'height="{max(2.0, wy(q1) - wy(q3)):.1f}" fill="{c}" fill-opacity="0.25" '
+                f'stroke="{c}" stroke-width="1.5"/>'
+            )
+            # Median line
+            lines.append(
+                f'<line x1="{cx - box_w / 2:.1f}" y1="{wy(med):.1f}" x2="{cx + box_w / 2:.1f}" y2="{wy(med):.1f}" '
+                f'stroke="{c}" stroke-width="2.5"/>'
+            )
+        lines.append(
+            f'<text x="{cx:.1f}" y="{y0 + panel_h + 18}" text-anchor="middle" fill="#222" font-size="11">'
+            f"{g.display_label} ({len(wr)}w)</text>"
+        )
+
+    lines.append("</svg>")
+    svg_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def parse_input_spec(spec: str) -> tuple[str, list[Path]]:
+    """Parse 'label=path1,path2,...', 'path1,path2,...', or 'path'."""
     if "=" in spec and not Path(spec).exists():
-        label, path_str = spec.split("=", 1)
-        return label, Path(path_str)
+        label, paths_str = spec.split("=", 1)
+        paths = [Path(p.strip()) for p in paths_str.split(",") if p.strip()]
+        return label, paths
+    if "," in spec and not Path(spec).exists():
+        paths = [Path(p.strip()) for p in spec.split(",") if p.strip()]
+        return (paths[0].stem if paths else spec), paths
     p = Path(spec)
-    return p.stem, p
+    return p.stem, [p]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1181,7 +1824,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "logs",
         nargs="+",
-        help="Log file path(s), optionally prefixed with a label as 'LABEL=path/to/file.log'.",
+        help=(
+            "Log file path(s), optionally prefixed with a label and/or comma-separated "
+            "replicates: 'LABEL=run1.out,run2.out' or 'path/to/file.out'."
+        ),
     )
     parser.add_argument(
         "-o",
@@ -1202,6 +1848,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Print per-worker HTTP-SUMMARY breakdown table when HTTP-SUMMARY lines are present.",
     )
     parser.add_argument(
+        "--http-bin",
+        type=float,
+        default=60.0,
+        help="Time bin width in seconds for HTTP-SUMMARY time-series plots (default: 60).",
+    )
+    parser.add_argument(
         "-n",
         "--no-plot",
         action="store_true",
@@ -1214,21 +1866,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    runs: list[LogMetrics] = []
+    groups_by_label: dict[str, RunGroup] = {}
     for spec in args.logs:
-        label, path = parse_input_spec(spec)
-        if not path.exists():
-            print(f"Error: log file not found: {path}", file=sys.stderr)
+        label, paths = parse_input_spec(spec)
+        if not paths:
+            print(f"Error: no log files specified in '{spec}'", file=sys.stderr)
             return 1
-        runs.append(parse_log(path, label=label))
+        for path in paths:
+            if not path.exists():
+                print(f"Error: log file not found: {path}", file=sys.stderr)
+                return 1
+            run = parse_log(path, label=label)
+            if label not in groups_by_label:
+                groups_by_label[label] = RunGroup(label=label, runs=[])
+            groups_by_label[label].runs.append(run)
 
-    verify_versions(runs)
+    groups = list(groups_by_label.values())
 
-    for r in runs:
-        print_single_table(r, show_http_workers=args.http_workers)
+    verify_versions(groups)
 
-    if len(runs) >= 2:
-        print_comparison_table(runs)
+    for g in groups:
+        for r in g.runs:
+            print_single_table(r, show_http_workers=args.http_workers)
+        print_group_spread(g)
+
+    if len(groups) >= 2:
+        print_comparison_table(groups)
 
     if args.csv:
         import csv
@@ -1238,6 +1901,7 @@ def main(argv: list[str] | None = None) -> int:
             writer.writerow(
                 [
                     "label",
+                    "source_file",
                     "timestamp",
                     "elapsed_s",
                     "scanned",
@@ -1249,26 +1913,33 @@ def main(argv: list[str] | None = None) -> int:
                     "cumulative_rate_q_per_s",
                 ]
             )
-            for r in runs:
-                for s in r.samples:
-                    writer.writerow(
-                        [
-                            r.label,
-                            s.timestamp.isoformat() if s.timestamp else "",
-                            f"{s.elapsed_s:.3f}",
-                            s.scanned,
-                            s.total,
-                            f"{s.pct_complete:.4f}",
-                            f"{s.dt_s:.3f}",
-                            s.d_scanned,
-                            f"{s.interval_rate:.4f}",
-                            f"{s.cumulative_rate:.4f}",
-                        ]
-                    )
+            for g in groups:
+                for r in g.runs:
+                    for s in r.samples:
+                        writer.writerow(
+                            [
+                                g.label,
+                                r.path.name,
+                                s.timestamp.isoformat() if s.timestamp else "",
+                                f"{s.elapsed_s:.3f}",
+                                s.scanned,
+                                s.total,
+                                f"{s.pct_complete:.4f}",
+                                f"{s.dt_s:.3f}",
+                                s.d_scanned,
+                                f"{s.interval_rate:.4f}",
+                                f"{s.cumulative_rate:.4f}",
+                            ]
+                        )
         print(f"\nExported CSV to {args.csv}")
 
     if not args.no_plot:
-        plot_metrics(runs, args.output, show=args.show)
+        plot_metrics(groups, args.output, show=args.show)
+        if any(r.http_summaries for g in groups for r in g.runs):
+            http_out = args.output.with_name(
+                f"{args.output.stem}_http{args.output.suffix}"
+            )
+            plot_http_metrics(groups, http_out, bin_s=args.http_bin, show=args.show)
     return 0
 
 
