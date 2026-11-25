@@ -1144,17 +1144,30 @@ def print_comparison_table(groups: list[RunGroup]) -> None:
         )
 
 
-def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) -> None:
+def plot_metrics(
+    groups: list[RunGroup],
+    output_path: Path,
+    show: bool = False,
+    max_minutes: float | None = 30.0,
+) -> None:
+    if max_minutes is not None and max_minutes <= 0:
+        max_minutes = None
+    max_s = (max_minutes * 60.0 + 5.0) if max_minutes is not None else None
+
     try:
         import matplotlib.pyplot as plt
+        from matplotlib.ticker import MultipleLocator
     except ImportError:
         svg_path = output_path.with_suffix(".svg")
-        _write_svg_fallback(groups, svg_path)
+        _write_svg_fallback(groups, svg_path, max_minutes=max_minutes)
         print(
             f"\n[NOTE] matplotlib is not installed in {sys.executable}; "
             f"wrote standalone SVG plot to {svg_path}"
         )
         return
+
+    def keep_step(elapsed_s: float) -> bool:
+        return max_s is None or elapsed_s <= max_s
 
     has_comparison = len(groups) >= 2
     nrows = 3 if has_comparison else 2
@@ -1165,8 +1178,8 @@ def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) 
     # Panel 1: Cumulative quanta scanned vs time
     ax0 = axes[0]
     for g in groups:
-        series = g.step_series()
-        t_hr = [s.elapsed_s / 3600.0 for s in series]
+        series = [s for s in g.step_series() if keep_step(s.elapsed_s)]
+        t_min = [s.elapsed_s / 60.0 for s in series]
         q_k = [s.scanned_mean / 1e3 for s in series]
         mean_rate, sd_rate, _, _, _ = g.metric_stats(
             lambda r: r.overall_rate if r.samples else None
@@ -1177,7 +1190,7 @@ def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) 
             else f"{(mean_rate or 0.0):.2f} q/s"
         )
         (line,) = ax0.plot(
-            t_hr,
+            t_min,
             q_k,
             marker="o",
             markersize=3.5,
@@ -1187,26 +1200,28 @@ def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) 
         color = line.get_color()
         if g.is_multi:
             for r in g.runs:
-                rt = [s.elapsed_s / 3600.0 for s in r.samples]
-                rq = [s.scanned / 1e3 for s in r.samples]
+                rs = [s for s in r.samples if keep_step(s.elapsed_s)]
+                rt = [s.elapsed_s / 60.0 for s in rs]
+                rq = [s.scanned / 1e3 for s in rs]
                 ax0.plot(rt, rq, linewidth=0.9, alpha=0.35, color=color)
             lo = [(s.scanned_mean - s.scanned_sd) / 1e3 for s in series]
             hi = [(s.scanned_mean + s.scanned_sd) / 1e3 for s in series]
-            ax0.fill_between(t_hr, lo, hi, color=color, alpha=0.15)
+            ax0.fill_between(t_min, lo, hi, color=color, alpha=0.15)
     ax0.set_ylabel("Scanned Quanta (thousands)")
-    ax0.set_title("QuantumGraph Aggregator Scanning Progress & Rate")
+    title_suffix = f" (first {max_minutes:.0f} min)" if max_minutes is not None else ""
+    ax0.set_title(f"QuantumGraph Aggregator Scanning Progress & Rate{title_suffix}")
     ax0.grid(True, linestyle="--", alpha=0.5)
     ax0.legend(loc="upper left")
 
     # Panel 2: Interval & Cumulative scanning rate vs time
     ax1 = axes[1]
     for g in groups:
-        series = g.step_series()
-        t_hr = [s.elapsed_s / 3600.0 for s in series]
+        series = [s for s in g.step_series() if keep_step(s.elapsed_s)]
+        t_min = [s.elapsed_s / 60.0 for s in series]
         int_rate = [s.interval_rate_mean for s in series]
         cum_rate = [s.cum_rate_mean for s in series]
         (line,) = ax1.plot(
-            t_hr,
+            t_min,
             int_rate,
             marker="o",
             markersize=3.5,
@@ -1215,7 +1230,7 @@ def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) 
         )
         color = line.get_color()
         ax1.plot(
-            t_hr,
+            t_min,
             cum_rate,
             linestyle="--",
             linewidth=1.2,
@@ -1225,12 +1240,13 @@ def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) 
         )
         if g.is_multi:
             for r in g.runs:
-                rt = [s.elapsed_s / 3600.0 for s in r.samples]
-                ri = [s.interval_rate for s in r.samples]
+                rs = [s for s in r.samples if keep_step(s.elapsed_s)]
+                rt = [s.elapsed_s / 60.0 for s in rs]
+                ri = [s.interval_rate for s in rs]
                 ax1.plot(rt, ri, linewidth=0.8, alpha=0.30, color=color)
             lo = [s.interval_rate_mean - s.interval_rate_sd for s in series]
             hi = [s.interval_rate_mean + s.interval_rate_sd for s in series]
-            ax1.fill_between(t_hr, lo, hi, color=color, alpha=0.15)
+            ax1.fill_between(t_min, lo, hi, color=color, alpha=0.15)
     ax1.set_ylabel("Scan Rate (quanta / s)")
     ax1.grid(True, linestyle="--", alpha=0.5)
     ax1.legend(loc="lower right", ncol=2, fontsize="small")
@@ -1239,14 +1255,14 @@ def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) 
     if has_comparison:
         ax2 = axes[2]
         base = groups[0]
-        base_series = base.step_series()
+        base_series = [s for s in base.step_series() if keep_step(s.elapsed_s)]
         for g in groups[1:]:
-            g_series = g.step_series()
+            g_series = [s for s in g.step_series() if keep_step(s.elapsed_s)]
             n = min(len(base_series), len(g_series))
-            t_hr = [base_series[i].elapsed_s / 3600.0 for i in range(n)]
+            t_min = [base_series[i].elapsed_s / 60.0 for i in range(n)]
             dq = [g_series[i].scanned_mean - base_series[i].scanned_mean for i in range(n)]
             ax2.plot(
-                t_hr,
+                t_min,
                 dq,
                 marker="s",
                 markersize=3.5,
@@ -1259,7 +1275,14 @@ def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) 
         ax2.grid(True, linestyle="--", alpha=0.5)
         ax2.legend(loc="best")
 
-    axes[-1].set_xlabel("Elapsed Time (hours)")
+    axes[-1].set_xlabel("Elapsed Time (minutes)")
+    if max_minutes is not None:
+        axes[-1].set_xlim(0.0, max_minutes)
+        if max_minutes <= 90.0:
+            axes[-1].xaxis.set_major_locator(MultipleLocator(5.0))
+    else:
+        axes[-1].set_xlim(left=0.0)
+
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     print(f"\nSaved plot to {output_path}")
@@ -1268,9 +1291,16 @@ def plot_metrics(groups: list[RunGroup], output_path: Path, show: bool = False) 
     plt.close(fig)
 
 
-def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
+def _write_svg_fallback(
+    groups: list[RunGroup], svg_path: Path, max_minutes: float | None = 30.0
+) -> None:
     """Generate a clean multi-panel SVG plot using only the Python standard library."""
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+    max_s = (max_minutes * 60.0 + 5.0) if max_minutes is not None else None
+
+    def keep_step(elapsed_s: float) -> bool:
+        return max_s is None or elapsed_s <= max_s
+
     has_comp = len(groups) >= 2
     width = 860
     panel_h = 220
@@ -1284,19 +1314,28 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
     plot_w = width - left_margin - right_margin
 
     all_runs = [r for g in groups for r in g.runs]
-    all_t = [s.elapsed_s / 3600.0 for r in all_runs for s in r.samples] or [0.0, 1.0]
-    t_min, t_max = 0.0, max(all_t) * 1.02
+    all_t = [
+        s.elapsed_s / 60.0 for r in all_runs for s in r.samples if keep_step(s.elapsed_s)
+    ] or [0.0, 30.0]
+    t_min = 0.0
+    t_max = max_minutes if max_minutes is not None else max(all_t) * 1.02
 
     def sx(t: float) -> float:
         return left_margin + (t - t_min) / (t_max - t_min or 1.0) * plot_w
 
+    title_suffix = f" (first {max_minutes:.0f} min)" if max_minutes is not None else ""
     lines: list[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" ',
         f'viewBox="0 0 {width} {height}" font-family="sans-serif" font-size="12">',
-        f'<rect width="100%" height="100%" fill="#ffffff"/>',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
         f'<text x="{width / 2}" y="28" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">',
-        f"QuantumGraph Aggregator Scanning Progress &amp; Rate</text>",
+        f"QuantumGraph Aggregator Scanning Progress &amp; Rate{title_suffix}</text>",
     ]
+
+    if max_minutes is not None and max_minutes <= 90.0:
+        xticks = [float(m) for m in range(0, int(max_minutes) + 1, 5)]
+    else:
+        xticks = [t_min + (i / 6.0) * (t_max - t_min) for i in range(7)]
 
     def draw_panel(
         row: int,
@@ -1322,10 +1361,7 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
                 f'<text x="{left_margin - 8}" y="{py + 4:.1f}" text-anchor="end" fill="#555" font-size="11">'
                 f"{val:,.1f}</text>"
             )
-        n_xticks = 6
-        for i in range(n_xticks + 1):
-            frac = i / n_xticks
-            t_val = t_min + frac * (t_max - t_min)
+        for t_val in xticks:
             px = sx(t_val)
             lines.append(
                 f'<line x1="{px:.1f}" y1="{y0}" x2="{px:.1f}" y2="{y0 + panel_h}" '
@@ -1334,7 +1370,7 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
             if row == nrows - 1:
                 lines.append(
                     f'<text x="{px:.1f}" y="{y0 + panel_h + 18}" text-anchor="middle" fill="#555" font-size="11">'
-                    f"{t_val:.1f}h</text>"
+                    f"{t_val:.0f}m</text>"
                 )
         cy = y0 + panel_h / 2
         lines.append(
@@ -1374,15 +1410,20 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
 
     # Panel 1: Cumulative Quanta (thousands)
     max_q_k = (
-        max((s.scanned / 1e3 for r in all_runs for s in r.samples), default=1.0) * 1.08
+        max(
+            (s.scanned / 1e3 for r in all_runs for s in r.samples if keep_step(s.elapsed_s)),
+            default=1.0,
+        )
+        * 1.08
     )
     p1_series = []
     for idx, g in enumerate(groups):
         c = colors[idx % len(colors)]
         if g.is_multi:
             for r in g.runs:
+                rs = [s for s in r.samples if keep_step(s.elapsed_s)]
                 p1_series.append(
-                    (None, [(s.elapsed_s / 3600.0, s.scanned / 1e3) for s in r.samples], c, "", 0.35)
+                    (None, [(s.elapsed_s / 60.0, s.scanned / 1e3) for s in rs], c, "", 0.35)
                 )
         mean_r, sd_r, _, _, _ = g.metric_stats(lambda r: r.overall_rate if r.samples else None)
         rate_s = (
@@ -1390,10 +1431,11 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
             if (g.is_multi and mean_r is not None and sd_r is not None)
             else f"{(mean_r or 0.0):.2f} q/s"
         )
+        g_ser = [s for s in g.step_series() if keep_step(s.elapsed_s)]
         p1_series.append(
             (
                 f"{g.display_label} ({rate_s})",
-                [(s.elapsed_s / 3600.0, s.scanned_mean / 1e3) for s in g.step_series()],
+                [(s.elapsed_s / 60.0, s.scanned_mean / 1e3) for s in g_ser],
                 c,
                 "",
                 1.0,
@@ -1402,8 +1444,10 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
     draw_panel(0, 0.0, max_q_k, "Scanned Quanta (k)", p1_series)
 
     # Panel 2: Interval & Cumulative Rate
-    all_rates = [s.interval_rate for r in all_runs for s in r.samples] + [
-        s.cumulative_rate for r in all_runs for s in r.samples
+    all_rates = [
+        s.interval_rate for r in all_runs for s in r.samples if keep_step(s.elapsed_s)
+    ] + [
+        s.cumulative_rate for r in all_runs for s in r.samples if keep_step(s.elapsed_s)
     ]
     r_min = max(0.0, min(all_rates, default=0.0) - 1.5)
     r_max = max(all_rates, default=1.0) + 1.5
@@ -1412,14 +1456,15 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
         c = colors[idx % len(colors)]
         if g.is_multi:
             for r in g.runs:
+                rs = [s for s in r.samples if keep_step(s.elapsed_s)]
                 p2_series.append(
-                    (None, [(s.elapsed_s / 3600.0, s.interval_rate) for s in r.samples], c, "", 0.30)
+                    (None, [(s.elapsed_s / 60.0, s.interval_rate) for s in rs], c, "", 0.30)
                 )
-        series = g.step_series()
+        series = [s for s in g.step_series() if keep_step(s.elapsed_s)]
         p2_series.append(
             (
                 f"{g.display_label} interval rate",
-                [(s.elapsed_s / 3600.0, s.interval_rate_mean) for s in series],
+                [(s.elapsed_s / 60.0, s.interval_rate_mean) for s in series],
                 c,
                 "",
                 1.0,
@@ -1428,7 +1473,7 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
         p2_series.append(
             (
                 f"{g.display_label} cumulative rate",
-                [(s.elapsed_s / 3600.0, s.cum_rate_mean) for s in series],
+                [(s.elapsed_s / 60.0, s.cum_rate_mean) for s in series],
                 c,
                 "5,4",
                 1.0,
@@ -1439,15 +1484,15 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
     # Panel 3: Quanta Lead
     if has_comp:
         base = groups[0]
-        base_s = base.step_series()
+        base_s = [s for s in base.step_series() if keep_step(s.elapsed_s)]
         p3_series = []
         all_dq = [0.0]
         for idx, g in enumerate(groups[1:], start=1):
-            g_s = g.step_series()
+            g_s = [s for s in g.step_series() if keep_step(s.elapsed_s)]
             n = min(len(base_s), len(g_s))
             pts = [
                 (
-                    base_s[i].elapsed_s / 3600.0,
+                    base_s[i].elapsed_s / 60.0,
                     float(g_s[i].scanned_mean - base_s[i].scanned_mean),
                 )
                 for i in range(n)
@@ -1468,7 +1513,7 @@ def _write_svg_fallback(groups: list[RunGroup], svg_path: Path) -> None:
 
     lines.append(
         f'<text x="{left_margin + plot_w / 2}" y="{height - 15}" text-anchor="middle" '
-        f'fill="#222" font-size="13">Elapsed Time (hours)</text>'
+        f'fill="#222" font-size="13">Elapsed Time (minutes)</text>'
     )
     lines.append("</svg>")
     svg_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1874,6 +1919,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Time bin width in seconds for HTTP-SUMMARY time-series plots (default: 60).",
     )
     parser.add_argument(
+        "--max-minutes",
+        type=float,
+        default=30.0,
+        help="Truncate scan_timing plot x-axis at this many minutes (default: 30 = 0.5h; 0 for no truncation).",
+    )
+    parser.add_argument(
         "-n",
         "--no-plot",
         action="store_true",
@@ -1954,7 +2005,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nExported CSV to {args.csv}")
 
     if not args.no_plot:
-        plot_metrics(groups, args.output, show=args.show)
+        plot_metrics(groups, args.output, show=args.show, max_minutes=args.max_minutes)
         if any(r.http_summaries for g in groups for r in g.runs):
             http_out = args.output.with_name(
                 f"{args.output.stem}_http{args.output.suffix}"
