@@ -35,8 +35,7 @@ butlerConfig=dp2_prep
 
 set -xe
 
-export TMPDIR=/dev/shm
-export LSST_RESOURCES_TMPDIR=/dev/shm
+export LSST_HTTP_DIAG=1
 
 butler --long-log --log-level=DEBUG \
        aggregate-graph \
