@@ -12,9 +12,9 @@ site:
       pwd;
       git clone https://github.com/lsst/resources;
       pushd resources;
-      git checkout tickets/DM-57094;
+      git checkout tickets/DM-57094-http-bench;
       setup -j -r .;
-      scons -j 48;
+      scons -j 24;
       popd;
       taskset -pc $$;
 
@@ -23,10 +23,10 @@ computeSite: RAL
 
 customJob:
   queue: ""
-  executable: run_final_job_DM-57094-64.sh
+  executable: run_final_job_DM-57094-http-bench-32.sh
   arguments: ""
-  requestCpus: 64
-  requestMemory: 128000
+  requestCpus: 32
+  requestMemory: 64000
 
 payload:
-  payloadName: final_job_test_DM-57094-64
+  payloadName: final_job_test_DM-57094-http-bench-32

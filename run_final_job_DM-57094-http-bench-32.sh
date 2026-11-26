@@ -42,6 +42,6 @@ butler --long-log --log-level=DEBUG \
        aggregate-graph \
        ${local_qg} \
        ${butlerConfig} \
-       -j 64 \
+       -j 32 \
        --register-dataset-types \
        --update-output-chain

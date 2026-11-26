@@ -35,10 +35,13 @@ butlerConfig=dp2_prep
 
 set -xe
 
+export TMPDIR=/dev/shm
+export LSST_RESOURCES_TMPDIR=/dev/shm
+
 butler --long-log --log-level=DEBUG \
        aggregate-graph \
        ${local_qg} \
        ${butlerConfig} \
-       -j 64 \
+       -j 16 \
        --register-dataset-types \
        --update-output-chain
