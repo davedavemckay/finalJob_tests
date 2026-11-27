@@ -25,9 +25,7 @@ PROGRESS_RE = re.compile(
 )
 # Matches output of:
 #   python -c "import lsst.resources; print(lsst.resources.__file__, getattr(lsst.resources, '__version__', None))"
-RESOURCES_FILE_RE = re.compile(
-    r"^(\S*lsst/resources/__init__\.pyc?)(?:\s+(\S.*))?$"
-)
+RESOURCES_FILE_RE = re.compile(r"^(\S*lsst/resources/__init__\.pyc?)(?:\s+(\S.*))?$")
 # Matches output of `eups list | grep resources` (only the line tagged `setup`):
 #   resources             LOCAL:/sdf/data/rubin/user/.../resources      setup
 EUPS_WITH_PKG_RE = re.compile(
@@ -283,7 +281,9 @@ class LogMetrics:
             be_reuse_ms=be_reuse_ms,
             be_avg_ms=be_avg_ms,
             be_pools_max=max((w.be_pools for w in workers), default=0),
-            be_hosts_mean=statistics.mean(w.be_hosts for w in workers) if workers else 0.0,
+            be_hosts_mean=statistics.mean(w.be_hosts for w in workers)
+            if workers
+            else 0.0,
             be_hosts_max=max((w.be_hosts for w in workers), default=0),
             read_n_total=read_n_tot,
             read_avg_ms=read_avg_ms,
@@ -310,7 +310,9 @@ class LogMetrics:
 
         n_workers = len(by_worker)
         # Collect (bin_idx, dn, dt, sum_get_ms, sum_write_ms, d_fe, sum_fe_ms, d_be, sum_be_ms)
-        bins: dict[int, list[tuple[int, float, float, float, int, float, int, float]]] = {}
+        bins: dict[
+            int, list[tuple[int, float, float, float, int, float, int, float]]
+        ] = {}
 
         for series in by_worker.values():
             series_sorted = sorted(series, key=lambda x: x.up_s)
@@ -322,9 +324,13 @@ class LogMetrics:
                     sum_get = curr.as_local_n * curr.as_local_get_ms
                     sum_write = curr.as_local_n * curr.as_local_write_ms
                     d_fe = curr.fe_total
-                    sum_fe = curr.fe_new * curr.fe_new_ms + curr.fe_reuse * curr.fe_reuse_ms
+                    sum_fe = (
+                        curr.fe_new * curr.fe_new_ms + curr.fe_reuse * curr.fe_reuse_ms
+                    )
                     d_be = curr.be_total
-                    sum_be = curr.be_new * curr.be_new_ms + curr.be_reuse * curr.be_reuse_ms
+                    sum_be = (
+                        curr.be_new * curr.be_new_ms + curr.be_reuse * curr.be_reuse_ms
+                    )
                     mid_t = curr.up_s / 2.0
                 else:
                     dt = curr.up_s - prev.up_s
@@ -338,11 +344,15 @@ class LogMetrics:
                     d_fe = curr.fe_total - prev.fe_total
                     sum_fe = (
                         curr.fe_new * curr.fe_new_ms + curr.fe_reuse * curr.fe_reuse_ms
-                    ) - (prev.fe_new * prev.fe_new_ms + prev.fe_reuse * prev.fe_reuse_ms)
+                    ) - (
+                        prev.fe_new * prev.fe_new_ms + prev.fe_reuse * prev.fe_reuse_ms
+                    )
                     d_be = curr.be_total - prev.be_total
                     sum_be = (
                         curr.be_new * curr.be_new_ms + curr.be_reuse * curr.be_reuse_ms
-                    ) - (prev.be_new * prev.be_new_ms + prev.be_reuse * prev.be_reuse_ms)
+                    ) - (
+                        prev.be_new * prev.be_new_ms + prev.be_reuse * prev.be_reuse_ms
+                    )
                     mid_t = (prev.up_s + curr.up_s) / 2.0
 
                 prev = curr
@@ -706,8 +716,12 @@ def parse_log(path: Path, label: str | None = None) -> LogMetrics:
                         as_local_n=int(m.group(19)),
                         as_local_get_ms=float(m.group(20)),
                         as_local_write_ms=float(m.group(21)),
-                        as_local_net_ms=float(m.group(22)) if m.group(22) is not None else None,
-                        as_local_disk_ms=float(m.group(23)) if m.group(23) is not None else None,
+                        as_local_net_ms=float(m.group(22))
+                        if m.group(22) is not None
+                        else None,
+                        as_local_disk_ms=float(m.group(23))
+                        if m.group(23) is not None
+                        else None,
                         as_local_buf=int(m.group(24)),
                         dav=_safe_literal_dict(m.group(25)),
                     )
@@ -799,9 +813,7 @@ def verify_versions(groups: list[RunGroup]) -> None:
         # Within-group consistency check for replicates
         if g.is_multi:
             rep_versions = {
-                (r.resources_file, r.eups_version)
-                for r in g.runs
-                if r.has_version_info
+                (r.resources_file, r.eups_version) for r in g.runs if r.has_version_info
             }
             if len(rep_versions) > 1:
                 print(
@@ -811,8 +823,7 @@ def verify_versions(groups: list[RunGroup]) -> None:
 
     # Cross-group distinctness check (compare representative run with version info per group)
     group_reps = [
-        (g.label, next((r for r in g.runs if r.has_version_info), None))
-        for g in groups
+        (g.label, next((r for r in g.runs if r.has_version_info), None)) for g in groups
     ]
     with_info = [(lbl, r) for lbl, r in group_reps if r is not None]
     if len(with_info) >= 2:
@@ -849,7 +860,9 @@ def print_http_summary(m: LogMetrics, show_workers: bool = False) -> None:
         f"\n  --- HTTP-SUMMARY Diagnostics ({agg.worker_count} workers, {agg.total_reports} reports, "
         f"max up={agg.max_up_s:.1f}s) ---"
     )
-    print(f"  Total HTTP requests      : {agg.total_reqs:,d}  status={agg.status_counts}")
+    print(
+        f"  Total HTTP requests      : {agg.total_reqs:,d}  status={agg.status_counts}"
+    )
     if agg.dav_counts:
         print(f"  WebDAV calls             : {agg.dav_counts}")
     print(
@@ -904,8 +917,16 @@ def print_http_summary(m: LogMetrics, show_workers: bool = False) -> None:
                 if w.be_total
                 else 0.0
             )
-            net_s = f"{w.as_local_net_ms:6.1f}" if w.as_local_net_ms is not None else f"{'N/A':>6}"
-            disk_s = f"{w.as_local_disk_ms:5.1f}" if w.as_local_disk_ms is not None else f"{'N/A':>5}"
+            net_s = (
+                f"{w.as_local_net_ms:6.1f}"
+                if w.as_local_net_ms is not None
+                else f"{'N/A':>6}"
+            )
+            disk_s = (
+                f"{w.as_local_disk_ms:5.1f}"
+                if w.as_local_disk_ms is not None
+                else f"{'N/A':>5}"
+            )
             print(
                 f"  {w.proc:<14} | {w.pid:7d} | {w.up_s:8.1f} | {w.as_local_n:8,d} | "
                 f"{w.as_local_rate:6.2f} | {fe_avg:6.1f} | {w.fe_reuse_pct:4.1f}% | "
@@ -981,7 +1002,11 @@ def print_group_spread(group: RunGroup) -> None:
         mean_v, sd_v, min_v, max_v, n = group.metric_stats(getter)
         if mean_v is None:
             return
-        cv_s = f"{100.0 * sd_v / mean_v:6.2f}%" if (sd_v is not None and mean_v != 0) else f"{'N/A':>7}"
+        cv_s = (
+            f"{100.0 * sd_v / mean_v:6.2f}%"
+            if (sd_v is not None and mean_v != 0)
+            else f"{'N/A':>7}"
+        )
         sd_s = f"{sd_v:7.2f} {unit:<2}" if sd_v is not None else f"{'N/A':>10}"
         print(
             f"{name:<32} | {mean_v:8.2f} {unit:<2} | {sd_s} | {cv_s} | "
@@ -991,26 +1016,70 @@ def print_group_spread(group: RunGroup) -> None:
     row("Read predicted graph", lambda r: r.read_graph_duration_s, "s")
     row("Analyze -> defensive ingest", lambda r: r.analyze_to_defensive_s, "s")
     row("Logged pre-scan [after]", lambda r: r.defensive_ingest_after_s, "s")
-    row("Quanta @ 600s", lambda r: float(r.samples[0].scanned) if r.samples else None, "q")
+    row(
+        "Quanta @ 600s",
+        lambda r: float(r.samples[0].scanned) if r.samples else None,
+        "q",
+    )
     row(
         "Active scan rate @ 600s",
-        lambda r: r.samples[0].scanned / (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0))
-        if r.samples and (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0)) > 0
-        else None,
+        lambda r: (
+            r.samples[0].scanned
+            / (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0))
+            if r.samples
+            and (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0)) > 0
+            else None
+        ),
         "q/s",
     )
     row("Overall rate", lambda r: r.overall_rate if r.samples else None, "q/s")
-    row("Active scan rate (post-setup)", lambda r: r.active_scan_rate if r.samples else None, "q/s")
-    row("Steady-state rate (t>600s)", lambda r: r.steady_state_rate if r.samples else None, "q/s")
-    row("Projected total time", lambda r: r.estimated_total_hours if r.samples else None, "h")
+    row(
+        "Active scan rate (post-setup)",
+        lambda r: r.active_scan_rate if r.samples else None,
+        "q/s",
+    )
+    row(
+        "Steady-state rate (t>600s)",
+        lambda r: r.steady_state_rate if r.samples else None,
+        "q/s",
+    )
+    row(
+        "Projected total time",
+        lambda r: r.estimated_total_hours if r.samples else None,
+        "h",
+    )
 
     if any(r.http_summaries for r in group.runs):
-        row("FE avg latency", lambda r: a.fe_avg_ms if (a := r.http_aggregate()) else None, "ms")
-        row("BE avg latency", lambda r: a.be_avg_ms if (a := r.http_aggregate()) else None, "ms")
-        row("as_local() total avg", lambda r: a.as_local_total_ms if (a := r.http_aggregate()) else None, "ms")
-        row("as_local() get avg", lambda r: a.as_local_get_ms if (a := r.http_aggregate()) else None, "ms")
-        row("as_local() write avg", lambda r: a.as_local_write_ms if (a := r.http_aggregate()) else None, "ms")
-        row("as_local() agg throughput", lambda r: a.as_local_agg_rate if (a := r.http_aggregate()) else None, "/s")
+        row(
+            "FE avg latency",
+            lambda r: a.fe_avg_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        row(
+            "BE avg latency",
+            lambda r: a.be_avg_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        row(
+            "as_local() total avg",
+            lambda r: a.as_local_total_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        row(
+            "as_local() get avg",
+            lambda r: a.as_local_get_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        row(
+            "as_local() write avg",
+            lambda r: a.as_local_write_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        row(
+            "as_local() agg throughput",
+            lambda r: a.as_local_agg_rate if (a := r.http_aggregate()) else None,
+            "/s",
+        )
 
 
 def print_comparison_table(groups: list[RunGroup]) -> None:
@@ -1040,9 +1109,15 @@ def print_comparison_table(groups: list[RunGroup]) -> None:
                 cells.append(f"{'N/A':>{col_w}}")
             elif g.is_multi and sd_v is not None:
                 val_s = f"{mean_v:.2f}±{sd_v:.2f}"
-                cells.append(f"{val_s:>{col_w - 3}} {unit:<2}" if unit else f"{val_s:>{col_w}}")
+                cells.append(
+                    f"{val_s:>{col_w - 3}} {unit:<2}" if unit else f"{val_s:>{col_w}}"
+                )
             else:
-                cells.append(f"{mean_v:{col_w - 3}.2f} {unit:<2}" if unit else f"{mean_v:{col_w}.2f}")
+                cells.append(
+                    f"{mean_v:{col_w - 3}.2f} {unit:<2}"
+                    if unit
+                    else f"{mean_v:{col_w}.2f}"
+                )
 
         diff_str = ""
         m0, m1 = stats_list[0][0], stats_list[1][0] if len(groups) >= 2 else None
@@ -1058,12 +1133,20 @@ def print_comparison_table(groups: list[RunGroup]) -> None:
     fmt_row("Read predicted graph", lambda r: r.read_graph_duration_s, "s")
     fmt_row("Analyze -> defensive ingest", lambda r: r.analyze_to_defensive_s, "s")
     fmt_row("Logged pre-scan [after]", lambda r: r.defensive_ingest_after_s, "s")
-    fmt_row("Quanta @ 600s", lambda r: float(r.samples[0].scanned) if r.samples else None, "q")
+    fmt_row(
+        "Quanta @ 600s",
+        lambda r: float(r.samples[0].scanned) if r.samples else None,
+        "q",
+    )
     fmt_row(
         "Active scan rate @ 600s",
-        lambda r: r.samples[0].scanned / (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0))
-        if r.samples and (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0)) > 0
-        else None,
+        lambda r: (
+            r.samples[0].scanned
+            / (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0))
+            if r.samples
+            and (r.samples[0].elapsed_s - (r.defensive_ingest_after_s or 0.0)) > 0
+            else None
+        ),
         "q/s",
     )
 
@@ -1071,28 +1154,55 @@ def print_comparison_table(groups: list[RunGroup]) -> None:
     all_step_counts = [len(r.samples) for g in groups for r in g.runs if r.samples]
     common_n = min(all_step_counts) if all_step_counts else 0
     if common_n > 0 and len(set(all_step_counts)) > 1:
-        common_t = next(r.samples[common_n - 1].elapsed_s for g in groups for r in g.runs if len(r.samples) >= common_n)
+        common_t = next(
+            r.samples[common_n - 1].elapsed_s
+            for g in groups
+            for r in g.runs
+            if len(r.samples) >= common_n
+        )
         fmt_row(
             f"Quanta @ {common_t:.0f}s (step {common_n})",
-            lambda r: float(r.samples[common_n - 1].scanned) if len(r.samples) >= common_n else None,
+            lambda r: (
+                float(r.samples[common_n - 1].scanned)
+                if len(r.samples) >= common_n
+                else None
+            ),
             "q",
         )
         fmt_row(
             f"Steady rate (600s->{common_t:.0f}s)",
-            lambda r: (r.samples[common_n - 1].scanned - r.samples[0].scanned)
-            / (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s)
-            if common_n >= 2
-            and len(r.samples) >= common_n
-            and (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s) > 0
-            else None,
+            lambda r: (
+                (r.samples[common_n - 1].scanned - r.samples[0].scanned)
+                / (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s)
+                if common_n >= 2
+                and len(r.samples) >= common_n
+                and (r.samples[common_n - 1].elapsed_s - r.samples[0].elapsed_s) > 0
+                else None
+            ),
             "q/s",
         )
 
-    fmt_row("Final quanta scanned", lambda r: float(r.final_scanned) if r.samples else None, "q")
+    fmt_row(
+        "Final quanta scanned",
+        lambda r: float(r.final_scanned) if r.samples else None,
+        "q",
+    )
     fmt_row("Overall rate", lambda r: r.overall_rate if r.samples else None, "q/s")
-    fmt_row("Active scan rate (post-setup)", lambda r: r.active_scan_rate if r.samples else None, "q/s")
-    fmt_row("Steady-state rate (t>600s)", lambda r: r.steady_state_rate if r.samples else None, "q/s")
-    fmt_row("Projected total time", lambda r: r.estimated_total_hours if r.samples else None, "h")
+    fmt_row(
+        "Active scan rate (post-setup)",
+        lambda r: r.active_scan_rate if r.samples else None,
+        "q/s",
+    )
+    fmt_row(
+        "Steady-state rate (t>600s)",
+        lambda r: r.steady_state_rate if r.samples else None,
+        "q/s",
+    )
+    fmt_row(
+        "Projected total time",
+        lambda r: r.estimated_total_hours if r.samples else None,
+        "h",
+    )
 
     if len(groups) == 2:
         sa_list = groups[0].step_series()
@@ -1121,25 +1231,83 @@ def print_comparison_table(groups: list[RunGroup]) -> None:
         print("\n=== HTTP-SUMMARY Comparison ===")
         print(header)
         print("-" * len(header))
-        fmt_row("HTTP workers", lambda r: float(a.worker_count) if (a := r.http_aggregate()) else None, "")
-        fmt_row("Total HTTP requests", lambda r: float(a.total_reqs) if (a := r.http_aggregate()) else None, "")
-        fmt_row("FE reuse rate", lambda r: a.fe_reuse_pct if (a := r.http_aggregate()) else None, "%")
-        fmt_row("FE avg latency", lambda r: a.fe_avg_ms if (a := r.http_aggregate()) else None, "ms")
-        fmt_row("BE reuse rate", lambda r: a.be_reuse_pct if (a := r.http_aggregate()) else None, "%")
-        fmt_row("BE avg latency", lambda r: a.be_avg_ms if (a := r.http_aggregate()) else None, "ms")
-        fmt_row("BE hosts (avg/worker)", lambda r: a.be_hosts_mean if (a := r.http_aggregate()) else None, "")
-        fmt_row("as_local() count", lambda r: float(a.as_local_n_total) if (a := r.http_aggregate()) else None, "")
-        fmt_row("as_local() total avg", lambda r: a.as_local_total_ms if (a := r.http_aggregate()) else None, "ms")
-        fmt_row("as_local() get avg", lambda r: a.as_local_get_ms if (a := r.http_aggregate()) else None, "ms")
-        fmt_row("as_local() write avg", lambda r: a.as_local_write_ms if (a := r.http_aggregate()) else None, "ms")
-        fmt_row("as_local() write net avg", lambda r: a.as_local_net_ms if (a := r.http_aggregate()) else None, "ms")
-        fmt_row("as_local() write disk avg", lambda r: a.as_local_disk_ms if (a := r.http_aggregate()) else None, "ms")
-        fmt_row("as_local() agg throughput", lambda r: a.as_local_agg_rate if (a := r.http_aggregate()) else None, "/s")
+        fmt_row(
+            "HTTP workers",
+            lambda r: float(a.worker_count) if (a := r.http_aggregate()) else None,
+            "",
+        )
+        fmt_row(
+            "Total HTTP requests",
+            lambda r: float(a.total_reqs) if (a := r.http_aggregate()) else None,
+            "",
+        )
+        fmt_row(
+            "FE reuse rate",
+            lambda r: a.fe_reuse_pct if (a := r.http_aggregate()) else None,
+            "%",
+        )
+        fmt_row(
+            "FE avg latency",
+            lambda r: a.fe_avg_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        fmt_row(
+            "BE reuse rate",
+            lambda r: a.be_reuse_pct if (a := r.http_aggregate()) else None,
+            "%",
+        )
+        fmt_row(
+            "BE avg latency",
+            lambda r: a.be_avg_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        fmt_row(
+            "BE hosts (avg/worker)",
+            lambda r: a.be_hosts_mean if (a := r.http_aggregate()) else None,
+            "",
+        )
+        fmt_row(
+            "as_local() count",
+            lambda r: float(a.as_local_n_total) if (a := r.http_aggregate()) else None,
+            "",
+        )
+        fmt_row(
+            "as_local() total avg",
+            lambda r: a.as_local_total_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        fmt_row(
+            "as_local() get avg",
+            lambda r: a.as_local_get_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        fmt_row(
+            "as_local() write avg",
+            lambda r: a.as_local_write_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        fmt_row(
+            "as_local() write net avg",
+            lambda r: a.as_local_net_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        fmt_row(
+            "as_local() write disk avg",
+            lambda r: a.as_local_disk_ms if (a := r.http_aggregate()) else None,
+            "ms",
+        )
+        fmt_row(
+            "as_local() agg throughput",
+            lambda r: a.as_local_agg_rate if (a := r.http_aggregate()) else None,
+            "/s",
+        )
         fmt_row(
             "as_local() median worker rate",
-            lambda r: statistics.median(a.as_local_worker_rates)
-            if (a := r.http_aggregate()) and a.as_local_worker_rates
-            else None,
+            lambda r: (
+                statistics.median(a.as_local_worker_rates)
+                if (a := r.http_aggregate()) and a.as_local_worker_rates
+                else None
+            ),
             "/s",
         )
 
@@ -1208,7 +1376,7 @@ def plot_metrics(
             hi = [(s.scanned_mean + s.scanned_sd) / 1e3 for s in series]
             ax0.fill_between(t_min, lo, hi, color=color, alpha=0.15)
     ax0.set_ylabel("Scanned Quanta (thousands)")
-    title_suffix = f" (first {max_minutes:.0f} min)" if max_minutes is not None else ""
+    title_suffix = f" (10–{max_minutes:.0f} min)" if max_minutes is not None else ""
     ax0.set_title(f"QuantumGraph Aggregator Scanning Progress & Rate{title_suffix}")
     ax0.grid(True, linestyle="--", alpha=0.5)
     ax0.legend(loc="upper left")
@@ -1260,7 +1428,9 @@ def plot_metrics(
             g_series = [s for s in g.step_series() if keep_step(s.elapsed_s)]
             n = min(len(base_series), len(g_series))
             t_min = [base_series[i].elapsed_s / 60.0 for i in range(n)]
-            dq = [g_series[i].scanned_mean - base_series[i].scanned_mean for i in range(n)]
+            dq = [
+                g_series[i].scanned_mean - base_series[i].scanned_mean for i in range(n)
+            ]
             ax2.plot(
                 t_min,
                 dq,
@@ -1277,11 +1447,11 @@ def plot_metrics(
 
     axes[-1].set_xlabel("Elapsed Time (minutes)")
     if max_minutes is not None:
-        axes[-1].set_xlim(0.0, max_minutes)
+        axes[-1].set_xlim(10.0, max_minutes)
         if max_minutes <= 90.0:
             axes[-1].xaxis.set_major_locator(MultipleLocator(5.0))
     else:
-        axes[-1].set_xlim(left=0.0)
+        axes[-1].set_xlim(left=10.0)
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -1315,15 +1485,18 @@ def _write_svg_fallback(
 
     all_runs = [r for g in groups for r in g.runs]
     all_t = [
-        s.elapsed_s / 60.0 for r in all_runs for s in r.samples if keep_step(s.elapsed_s)
-    ] or [0.0, 30.0]
-    t_min = 0.0
+        s.elapsed_s / 60.0
+        for r in all_runs
+        for s in r.samples
+        if keep_step(s.elapsed_s)
+    ] or [10.0, 30.0]
+    t_min = 10.0
     t_max = max_minutes if max_minutes is not None else max(all_t) * 1.02
 
     def sx(t: float) -> float:
         return left_margin + (t - t_min) / (t_max - t_min or 1.0) * plot_w
 
-    title_suffix = f" (first {max_minutes:.0f} min)" if max_minutes is not None else ""
+    title_suffix = f" (10–{max_minutes:.0f} min)" if max_minutes is not None else ""
     lines: list[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" ',
         f'viewBox="0 0 {width} {height}" font-family="sans-serif" font-size="12">',
@@ -1333,7 +1506,7 @@ def _write_svg_fallback(
     ]
 
     if max_minutes is not None and max_minutes <= 90.0:
-        xticks = [float(m) for m in range(0, int(max_minutes) + 1, 5)]
+        xticks = [float(m) for m in range(10, int(max_minutes) + 1, 5)]
     else:
         xticks = [t_min + (i / 6.0) * (t_max - t_min) for i in range(7)]
 
@@ -1411,7 +1584,12 @@ def _write_svg_fallback(
     # Panel 1: Cumulative Quanta (thousands)
     max_q_k = (
         max(
-            (s.scanned / 1e3 for r in all_runs for s in r.samples if keep_step(s.elapsed_s)),
+            (
+                s.scanned / 1e3
+                for r in all_runs
+                for s in r.samples
+                if keep_step(s.elapsed_s)
+            ),
             default=1.0,
         )
         * 1.08
@@ -1423,9 +1601,17 @@ def _write_svg_fallback(
             for r in g.runs:
                 rs = [s for s in r.samples if keep_step(s.elapsed_s)]
                 p1_series.append(
-                    (None, [(s.elapsed_s / 60.0, s.scanned / 1e3) for s in rs], c, "", 0.35)
+                    (
+                        None,
+                        [(s.elapsed_s / 60.0, s.scanned / 1e3) for s in rs],
+                        c,
+                        "",
+                        0.35,
+                    )
                 )
-        mean_r, sd_r, _, _, _ = g.metric_stats(lambda r: r.overall_rate if r.samples else None)
+        mean_r, sd_r, _, _, _ = g.metric_stats(
+            lambda r: r.overall_rate if r.samples else None
+        )
         rate_s = (
             f"{mean_r:.2f}±{sd_r:.2f} q/s"
             if (g.is_multi and mean_r is not None and sd_r is not None)
@@ -1458,7 +1644,13 @@ def _write_svg_fallback(
             for r in g.runs:
                 rs = [s for s in r.samples if keep_step(s.elapsed_s)]
                 p2_series.append(
-                    (None, [(s.elapsed_s / 60.0, s.interval_rate) for s in rs], c, "", 0.30)
+                    (
+                        None,
+                        [(s.elapsed_s / 60.0, s.interval_rate) for s in rs],
+                        c,
+                        "",
+                        0.30,
+                    )
                 )
         series = [s for s in g.step_series() if keep_step(s.elapsed_s)]
         p2_series.append(
@@ -1782,8 +1974,12 @@ def _write_http_svg_fallback(
         if g.is_multi:
             for r in g.runs:
                 rb = r.http_time_bins(bin_s=bin_s)
-                p1.append((None, [(b.t_min, b.agg_as_local_rate) for b in rb], c, "", 0.30))
-        p1.append((g.display_label, [(b.t_min, b.agg_rate_mean) for b in s], c, "", 1.0))
+                p1.append(
+                    (None, [(b.t_min, b.agg_as_local_rate) for b in rb], c, "", 0.30)
+                )
+        p1.append(
+            (g.display_label, [(b.t_min, b.agg_rate_mean) for b in s], c, "", 1.0)
+        )
     draw_ts_panel(0, 0.0, max(all_rates) * 1.12, "Agg as_local (files/s)", p1)
 
     # Panel 2: as_local() total / get / write latency
@@ -1791,18 +1987,54 @@ def _write_http_svg_fallback(
     p2 = []
     for idx, (g, s) in enumerate(group_series):
         c = colors[idx % len(colors)]
-        p2.append((f"{g.display_label} total", [(b.t_min, b.total_ms_mean) for b in s], c, "", 1.0))
-        p2.append((f"{g.display_label} get", [(b.t_min, b.get_ms_mean) for b in s], c, "5,3", 0.9))
-        p2.append((f"{g.display_label} write", [(b.t_min, b.write_ms_mean) for b in s], c, "2,2", 0.9))
+        p2.append(
+            (
+                f"{g.display_label} total",
+                [(b.t_min, b.total_ms_mean) for b in s],
+                c,
+                "",
+                1.0,
+            )
+        )
+        p2.append(
+            (
+                f"{g.display_label} get",
+                [(b.t_min, b.get_ms_mean) for b in s],
+                c,
+                "5,3",
+                0.9,
+            )
+        )
+        p2.append(
+            (
+                f"{g.display_label} write",
+                [(b.t_min, b.write_ms_mean) for b in s],
+                c,
+                "2,2",
+                0.9,
+            )
+        )
     draw_ts_panel(1, 0.0, max(all_lat) * 1.15, "as_local Latency (ms)", p2)
 
     # Panel 3: FE & BE latency
-    all_fb = [v for _, s in group_series for b in s for v in (b.fe_ms_mean, b.be_ms_mean)] or [1.0]
+    all_fb = [
+        v for _, s in group_series for b in s for v in (b.fe_ms_mean, b.be_ms_mean)
+    ] or [1.0]
     p3 = []
     for idx, (g, s) in enumerate(group_series):
         c = colors[idx % len(colors)]
-        p3.append((f"{g.display_label} BE", [(b.t_min, b.be_ms_mean) for b in s], c, "", 1.0))
-        p3.append((f"{g.display_label} FE", [(b.t_min, b.fe_ms_mean) for b in s], c, "5,3", 0.9))
+        p3.append(
+            (f"{g.display_label} BE", [(b.t_min, b.be_ms_mean) for b in s], c, "", 1.0)
+        )
+        p3.append(
+            (
+                f"{g.display_label} FE",
+                [(b.t_min, b.fe_ms_mean) for b in s],
+                c,
+                "5,3",
+                0.9,
+            )
+        )
     draw_ts_panel(2, 0.0, max(all_fb) * 1.15, "FE / BE Latency (ms)", p3)
 
     # Panel 4: Per-worker rate distribution (dot + median/IQR bar per group)
@@ -1836,6 +2068,7 @@ def _write_http_svg_fallback(
         cx = left_margin + (idx + 0.5) * (plot_w / max(n_g, 1))
         c = colors[idx % len(colors)]
         if wr:
+
             def wy(v: float) -> float:
                 return y0 + panel_h - (v / (w_max or 1.0)) * panel_h
 
